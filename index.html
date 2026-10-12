@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en" class="scroll-smooth">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sonoman v1 — coiron labs</title>
+  <meta name="description" content="sonoman v1 by coiron labs — compact disc performance player.">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <style>
+    :root {
+      --bg-orange: #FF5500;
+    }
+    * {
+      box-sizing: border-box;
+      text-transform: lowercase;
+    }
+    body {
+      background-color: var(--bg-orange);
+      color: #000000;
+      font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+      font-weight: 700;
+      letter-spacing: -0.05em;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+    .track-ultra {
+      letter-spacing: -0.07em;
+    }
+    .track-tight {
+      letter-spacing: -0.04em;
+    }
+    ::selection {
+      background-color: #000000;
+      color: #FF5500;
+    }
+    /* brutalist custom scrollbar */
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: #FF5500; }
+    ::-webkit-scrollbar-thumb { background: #000000; }
+  </style>
+</head>
+<body class="bg-[#FF5500] text-black min-h-screen">
+
+  <!-- TOP HEADER -->
+  <header class="border-b-2 border-black px-6 sm:px-12 py-6 flex items-center justify-between sticky top-0 bg-[#FF5500] z-50">
+    <div class="flex items-baseline gap-3">
+      <a href="#top" class="text-3xl sm:text-4xl font-black track-ultra hover:opacity-75 transition-opacity">
+        coiron labs
+      </a>
+      <span class="text-sm sm:text-base font-bold opacity-75 hidden sm:inline">
+        / sonoman v1
+      </span>
+    </div>
+    
+    <div class="flex items-center gap-6 sm:gap-10 text-sm sm:text-base font-bold">
+      <a href="#specs" class="hover:underline hidden md:inline">specs</a>
+      <a href="#gallery" class="hover:underline hidden md:inline">photos</a>
+      <a href="mailto:contact@coironlabs.tech" class="hover:underline hidden lg:inline">contact@coironlabs.tech</a>
+      <a href="#waitlist" class="bg-black text-[#FF5500] px-4 py-2 hover:bg-transparent hover:text-black border-2 border-black transition-colors">
+        waitlist
+      </a>
+    </div>
+  </header>
+
+  <main id="top">
+
+    <!-- HERO SECTION: HUGE TYPOGRAPHY & LOTS OF NEGATIVE SPACE -->
+    <section class="px-6 sm:px-12 pt-16 sm:pt-28 pb-20 sm:pb-36 border-b-2 border-black">
+      
+      <!-- GIANT TITLE -->
+      <div class="mb-12 sm:mb-24">
+        <span class="block text-sm sm:text-xl font-bold mb-4 track-tight">
+          coiron labs &middot; acoustic hardware development &middot; batch 01
+        </span>
+        <h1 class="text-[18vw] sm:text-[16vw] font-black leading-[0.82] track-ultra">
+          sonoman<br>v1
+        </h1>
+      </div>
+
+      <!-- BRUTALIST STATEMENT -->
+      <div class="grid grid-cols-1 lg:grid-cols-12 gap-8 pt-8 border-t-2 border-black mb-20 sm:mb-32">
+        <div class="lg:col-span-8">
+          <p class="text-2xl sm:text-4xl lg:text-5xl font-extrabold leading-[1.05] track-ultra">
+            a standalone compact disc performance player engineered by coiron labs. built using upcycled vintage pc optical drives, analog linear pitch fader, real-time bpm detection, raspberry pi zero processing core, and dedicated hi-fi dac with stereo rca output.
+          </p>
+        </div>
+        
+        <div class="lg:col-span-4 flex flex-col justify-between space-y-6">
+          <div class="text-base sm:text-xl font-bold leading-snug track-tight">
+            not currently for mass commercial retail. limited units assembled by coiron labs for private testing, studios, and collectors.
+          </div>
+          <div class="space-y-2">
+            <a href="#waitlist" class="inline-block text-lg sm:text-xl font-black bg-black text-[#FF5500] px-6 py-4 border-2 border-black hover:bg-transparent hover:text-black transition-all">
+              request a machine &rarr;
+            </a>
+            <div class="text-xs font-bold opacity-60">
+              direct contact: contact@coironlabs.tech
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- MAIN INTERACTIVE PRODUCT EXHIBIT -->
+      <div class="border-2 border-black bg-[#E3E3E5] p-4 sm:p-12 mb-8">
+        
+        <!-- LARGE IMAGE DISPLAY -->
+        <div class="w-full aspect-[4/3] sm:aspect-[16/10] flex items-center justify-center overflow-hidden">
+          <img 
+            id="hero-img" 
+            src="images/hero-perspective.jpg" 
+            alt="sonoman v1 by coiron labs" 
+            class="max-w-full max-h-full object-contain cursor-pointer transition-opacity duration-150"
+            onclick="nextView()"
+          >
+        </div>
+
+        <!-- BRUTALIST CONTROLS BAR -->
+        <div class="mt-8 pt-6 border-t-2 border-black flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+          <div class="text-lg sm:text-xl font-extrabold track-ultra" id="view-label">
+            01 / perspective
+          </div>
+
+          <div class="flex flex-wrap gap-2 text-xs sm:text-sm font-bold">
+            <button onclick="setView(0)" class="view-btn px-3 py-1.5 border-2 border-black bg-black text-[#FF5500]">01 perspective</button>
+            <button onclick="setView(1)" class="view-btn px-3 py-1.5 border-2 border-black bg-transparent text-black hover:bg-black hover:text-[#FF5500]">02 top</button>
+            <button onclick="setView(2)" class="view-btn px-3 py-1.5 border-2 border-black bg-transparent text-black hover:bg-black hover:text-[#FF5500]">03 front</button>
+            <button onclick="setView(3)" class="view-btn px-3 py-1.5 border-2 border-black bg-transparent text-black hover:bg-black hover:text-[#FF5500]">04 rear</button>
+            <button onclick="setView(4)" class="view-btn px-3 py-1.5 border-2 border-black bg-transparent text-black hover:bg-black hover:text-[#FF5500]">05 side</button>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- CORE HARDWARE MANIFESTO: LARGE WORDS, NEGATIVE SPACE -->
+    <section class="px-6 sm:px-12 py-24 sm:py-40 border-b-2 border-black">
+      
+      <div class="mb-16 sm:mb-28">
+        <span class="block text-sm sm:text-xl font-bold mb-4 track-tight opacity-75">
+          coiron labs architecture
+        </span>
+        <h2 class="text-4xl sm:text-7xl lg:text-8xl font-black track-ultra leading-[0.9]">
+          hardware<br>manifesto
+        </h2>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-12 sm:gap-20">
+        
+        <div class="space-y-4 border-t-2 border-black pt-6">
+          <div class="text-sm font-bold opacity-60">01 / MECHANISM</div>
+          <h3 class="text-2xl sm:text-4xl font-extrabold track-ultra">upcycled optical drive</h3>
+          <p class="text-base sm:text-xl font-bold leading-normal track-tight">
+            reclaiming 5.25" pc mechanical drives. heavy-duty motors, motorized tray mechanism, and hardware disc clamp.
+          </p>
+        </div>
+
+        <div class="space-y-4 border-t-2 border-black pt-6">
+          <div class="text-sm font-bold opacity-60">02 / INTERFACE</div>
+          <h3 class="text-2xl sm:text-4xl font-extrabold track-ultra">cdj pitch & bpm</h3>
+          <p class="text-base sm:text-xl font-bold leading-normal track-tight">
+            analog linear fader with calibrated travel for variable speed control. real-time tempo detection engine projected on amber lcd.
+          </p>
+        </div>
+
+        <div class="space-y-4 border-t-2 border-black pt-6">
+          <div class="text-sm font-bold opacity-60">03 / COMPUTATION</div>
+          <h3 class="text-2xl sm:text-4xl font-extrabold track-ultra">raspberry pi zero</h3>
+          <p class="text-base sm:text-xl font-bold leading-normal track-tight">
+            low-latency embedded linux architecture handling disc transport, microswitch polling, and continuous audio streaming.
+          </p>
+        </div>
+
+        <div class="space-y-4 border-t-2 border-black pt-6">
+          <div class="text-sm font-bold opacity-60">04 / SIGNAL PATH</div>
+          <h3 class="text-2xl sm:text-4xl font-extrabold track-ultra">hi-fi dac & rca out</h3>
+          <p class="text-base sm:text-xl font-bold leading-normal track-tight">
+            dedicated i2s digital-to-analog converter with wide dynamic range. gold-plated unbalanced stereo rca outputs.
+          </p>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- PHOTOGRAPHIC RECORD (FULL BLEED EDITORIAL GRID) -->
+    <section id="gallery" class="px-6 sm:px-12 py-24 sm:py-40 border-b-2 border-black">
+      
+      <div class="mb-16 sm:mb-24 flex flex-col sm:flex-row sm:items-end justify-between gap-6">
+        <div>
+          <span class="block text-sm sm:text-xl font-bold mb-4 track-tight opacity-75">
+            coiron labs documentation
+          </span>
+          <h2 class="text-4xl sm:text-7xl lg:text-8xl font-black track-ultra leading-[0.9]">
+            photographic<br>details
+          </h2>
+        </div>
+        <span class="text-base sm:text-xl font-bold track-tight">
+          orange gloss · solid wood · tactile buttons
+        </span>
+      </div>
+
+      <!-- 2X2 BRUTALIST IMAGE GRID -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-8 sm:gap-12">
+        
+        <!-- TOP VIEW -->
+        <div class="border-2 border-black bg-[#EEEEEE] p-6 sm:p-10 flex flex-col justify-between">
+          <div class="aspect-square flex items-center justify-center p-4">
+            <img src="images/detail-top.jpg" alt="top surface" class="max-h-full max-w-full object-contain">
+          </div>
+          <div class="pt-6 border-t-2 border-black flex items-center justify-between text-base sm:text-lg font-bold">
+            <span>top surface & controls</span>
+            <span>fader / lcd</span>
+          </div>
+        </div>
+
+        <!-- FRONT VIEW -->
+        <div class="border-2 border-black bg-[#E3E3E3] p-6 sm:p-10 flex flex-col justify-between">
+          <div class="aspect-square flex items-center justify-center p-4">
+            <img src="images/detail-front.jpg" alt="front tray" class="max-h-full max-w-full object-contain">
+          </div>
+          <div class="pt-6 border-t-2 border-black flex items-center justify-between text-base sm:text-lg font-bold">
+            <span>motorized tray</span>
+            <span>cd-rw bay</span>
+          </div>
+        </div>
+
+        <!-- REAR VIEW -->
+        <div class="border-2 border-black bg-[#E3E3E3] p-6 sm:p-10 flex flex-col justify-between">
+          <div class="aspect-square flex items-center justify-center p-4">
+            <img src="images/detail-back.jpg" alt="rear rca" class="max-h-full max-w-full object-contain">
+          </div>
+          <div class="pt-6 border-t-2 border-black flex items-center justify-between text-base sm:text-lg font-bold">
+            <span>rear panel</span>
+            <span>rca l/r & ac switch</span>
+          </div>
+        </div>
+
+        <!-- SIDE VIEW -->
+        <div class="border-2 border-black bg-[#E3E3E3] p-6 sm:p-10 flex flex-col justify-between">
+          <div class="aspect-square flex items-center justify-center p-4">
+            <img src="images/detail-side.jpg" alt="wood side" class="max-h-full max-w-full object-contain">
+          </div>
+          <div class="pt-6 border-t-2 border-black flex items-center justify-between text-base sm:text-lg font-bold">
+            <span>solid wood cheeks</span>
+            <span>natural oak</span>
+          </div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- TECHNICAL SPECIFICATIONS (BRUTALIST FULL-WIDTH DATA SHEET) -->
+    <section id="specs" class="px-6 sm:px-12 py-24 sm:py-40 border-b-2 border-black">
+      
+      <div class="mb-16 sm:mb-24">
+        <span class="block text-sm sm:text-xl font-bold mb-4 track-tight opacity-75">
+          system specifications
+        </span>
+        <h2 class="text-4xl sm:text-7xl lg:text-8xl font-black track-ultra leading-[0.9]">
+          technical<br>specifications
+        </h2>
+      </div>
+
+      <div class="border-t-2 border-black divide-y-2 divide-black text-base sm:text-xl font-bold">
+        
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">laboratory</div>
+          <div class="md:col-span-8 font-black">coiron labs (coironlabs.tech)</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">product</div>
+          <div class="md:col-span-8 font-black">sonoman v1</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">mechanism</div>
+          <div class="md:col-span-8 font-black">upcycled 5.25" pc optical disc drive with motorized tray</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">processing unit</div>
+          <div class="md:col-span-8 font-black">raspberry pi zero (low-latency embedded audio stack)</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">d/a conversion</div>
+          <div class="md:col-span-8 font-black">dedicated audiophile hi-fi dac with i2s clock synchronization</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">pitch control</div>
+          <div class="md:col-span-8 font-black">analog linear fader with calibrated continuous travel</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">tempo analysis</div>
+          <div class="md:col-span-8 font-black">real-time bpm detection engine</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">display</div>
+          <div class="md:col-span-8 font-black">high-contrast backlit amber character matrix (track / time / bpm)</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">audio output</div>
+          <div class="md:col-span-8 font-black">dual gold-plated unbalanced rca stereo (l / r)</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">power</div>
+          <div class="md:col-span-8 font-black">integrated ac mains with standard iec c7 and mechanical rocker switch</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">materials</div>
+          <div class="md:col-span-8 font-black">lacquered gloss orange body and solid natural hardwood sides</div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-12 py-6 gap-2">
+          <div class="md:col-span-4 opacity-60">inquiries</div>
+          <div class="md:col-span-8 font-black">contact@coironlabs.tech</div>
+        </div>
+
+      </div>
+
+    </section>
+
+    <!-- WAITLIST & ORDER INQUIRY (GIANT DIRECT BRUTALIST FORM) -->
+    <section id="waitlist" class="px-6 sm:px-12 py-24 sm:py-40">
+      
+      <div class="max-w-4xl space-y-8">
+        
+        <span class="block text-sm sm:text-xl font-bold track-tight opacity-75">
+          coiron labs waitlist & pre-order inquiry
+        </span>
+
+        <h2 class="text-5xl sm:text-8xl lg:text-9xl font-black track-ultra leading-[0.85]">
+          get a<br>machine
+        </h2>
+
+        <p class="text-xl sm:text-3xl font-extrabold leading-tight track-tight">
+          sonoman v1 is built by coiron labs in limited runs. it is not in mass commercial retail, but available upon request. enter your email to join the waitlist for batch 01 or reach out directly at contact@coironlabs.tech.
+        </p>
+
+        <form onsubmit="handleWaitlist(event)" class="space-y-4 pt-4">
+          <div class="flex flex-col sm:flex-row gap-0 border-2 border-black">
+            <input 
+              type="email" 
+              id="waitlist-email" 
+              required 
+              placeholder="enter your email address" 
+              class="bg-transparent px-6 py-5 text-xl sm:text-2xl font-bold placeholder-black/50 text-black focus:outline-none flex-1 border-b-2 sm:border-b-0 sm:border-r-2 border-black"
+            >
+            <button 
+              type="submit" 
+              class="bg-black text-[#FF5500] hover:bg-[#FF5500] hover:text-black px-8 py-5 text-xl sm:text-2xl font-black transition-colors"
+            >
+              join list
+            </button>
+          </div>
+
+          <div id="waitlist-confirm" class="hidden p-6 border-2 border-black bg-black text-[#FF5500] text-lg sm:text-xl font-black">
+            you are on the list for batch 01. coiron labs will get in touch directly.
+          </div>
+        </form>
+
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- BRUTALIST FOOTER -->
+  <footer class="border-t-2 border-black px-6 sm:px-12 py-12 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-6 text-sm font-bold">
+    <div>
+      coiron labs &middot; hardware & acoustic engineering &middot; sonoman v1
+    </div>
+    <div class="flex items-center gap-6">
+      <a href="mailto:contact@coironlabs.tech" class="hover:underline">contact@coironlabs.tech</a>
+      <span>coironlabs.tech &middot; 2026</span>
+    </div>
+  </footer>
+
+  <!-- INTERACTIVE SCRIPT -->
+  <script>
+    const views = [
+      { src: 'images/hero-perspective.jpg', label: '01 / perspective' },
+      { src: 'images/detail-top.jpg', label: '02 / top surface & pitch fader' },
+      { src: 'images/detail-front.jpg', label: '03 / front motorized tray' },
+      { src: 'images/detail-back.jpg', label: '04 / rear panel & rca jacks' },
+      { src: 'images/detail-side.jpg', label: '05 / solid wood side cheek' }
+    ];
+
+    let current = 0;
+
+    function setView(index) {
+      current = index;
+      const img = document.getElementById('hero-img');
+      const label = document.getElementById('view-label');
+      
+      img.style.opacity = '0';
+      setTimeout(() => {
+        img.src = views[index].src;
+        label.textContent = views[index].label;
+        img.style.opacity = '1';
+      }, 100);
+
+      const btns = document.querySelectorAll('.view-btn');
+      btns.forEach((btn, i) => {
+        if (i === index) {
+          btn.className = 'view-btn px-3 py-1.5 border-2 border-black bg-black text-[#FF5500]';
+        } else {
+          btn.className = 'view-btn px-3 py-1.5 border-2 border-black bg-transparent text-black hover:bg-black hover:text-[#FF5500]';
+        }
+      });
+    }
+
+    function nextView() {
+      setView((current + 1) % views.length);
+    }
+
+    function handleWaitlist(e) {
+      e.preventDefault();
+      const input = document.getElementById('waitlist-email');
+      const email = input.value;
+      if (!email) return;
+
+      try {
+        const stored = JSON.parse(localStorage.getItem('sonoman_waitlist') || '[]');
+        stored.push({ email, date: new Date().toISOString() });
+        localStorage.setItem('sonoman_waitlist', JSON.stringify(stored));
+      } catch (err) {}
+
+      document.getElementById('waitlist-confirm').classList.remove('hidden');
+      input.value = '';
+    }
+  </script>
+</body>
+</html>
