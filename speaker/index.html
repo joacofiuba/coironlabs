@@ -1,0 +1,1482 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D Speaker — Coiron Labs</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #d6d8dd;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #speaker-viewport {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            cursor: grab;
+        }
+        #speaker-viewport:active {
+            cursor: grabbing;
+        }
+    </style>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.webgpu.js",
+            "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.webgpu.js",
+            "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.tsl.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div id="speaker-viewport"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+        import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+        /**
+         * ============================================================================
+         * MODULAR 3D COMPONENT: MainAudioSpeaker
+         * Exportable factory function to add the speaker into any WebGPU/WebGL scene:
+         * const speaker = createMainAudioSpeaker();
+         * scene.add(speaker);
+         * ============================================================================
+         */
+
+        function createMetallicGrainTexture(size = 512, contrast = 1.15, scale = 1.4, repeatCount = 4) {
+            const canvas = document.createElement('canvas');
+            canvas.width = size;
+            canvas.height = size;
+            const ctx = canvas.getContext('2d');
+            const imgData = ctx.createImageData(size, size);
+            const data = imgData.data;
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const idx = (y * size + x) * 4;
+                    const flake = Math.random() * 255;
+                    const wave = (Math.sin(x * 0.42 * scale) * Math.cos(y * 0.42 * scale) * 0.5 + 0.5) * 255;
+                    const val = Math.min(255, Math.max(0, (flake * 0.82 + wave * 0.18 - 128) * contrast + 128));
+                    data[idx] = val;
+                    data[idx + 1] = val;
+                    data[idx + 2] = val;
+                    data[idx + 3] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.wrapS = THREE.RepeatWrapping;
+            texture.wrapT = THREE.RepeatWrapping;
+            texture.repeat.set(repeatCount, repeatCount);
+            texture.needsUpdate = true;
+            return texture;
+        }
+
+        function createRadialWooferConeMaps(size = 1024) {
+            const colorCanvas = document.createElement('canvas');
+            const roughCanvas = document.createElement('canvas');
+            const bumpCanvas = document.createElement('canvas');
+            colorCanvas.width = roughCanvas.width = bumpCanvas.width = size;
+            colorCanvas.height = roughCanvas.height = bumpCanvas.height = size;
+
+            const cCtx = colorCanvas.getContext('2d');
+            const rCtx = roughCanvas.getContext('2d');
+            const bCtx = bumpCanvas.getContext('2d');
+
+            const cImg = cCtx.createImageData(size, size);
+            const rImg = rCtx.createImageData(size, size);
+            const bImg = bCtx.createImageData(size, size);
+
+            const cData = cImg.data;
+            const rData = rImg.data;
+            const bData = bImg.data;
+
+            const half = size * 0.5;
+            const maxR = 1.41;
+
+            for (let y = 0; y < size; y++) {
+                for (let x = 0; x < size; x++) {
+                    const idx = (y * size + x) * 4;
+                    const dx = (x - half) / (half * 0.96);
+                    const dy = (y - half) / (half * 0.96);
+                    const distNorm = Math.sqrt(dx * dx + dy * dy);
+                    const rWorld = distNorm * maxR;
+                    const angle = Math.atan2(dy, dx);
+
+                    // Fine paper/carbon pulp micro-grain
+                    const microGrain =
+                        Math.sin(angle * 220 + distNorm * 18) * 0.35 +
+                        Math.cos(angle * 380 - distNorm * 25) * 0.25 +
+                        (Math.random() - 0.5) * 0.55;
+
+                    let lum = 10;
+                    let rough = 150;
+                    let bump = 128;
+
+                    if (rWorld <= 0.43) {
+                        // Central convex dust cap: deep carbon black with subtle satin center highlight
+                        const tCap = rWorld / 0.43;
+                        const capGrad = Math.cos(tCap * Math.PI * 0.5);
+                        lum = 9 + capGrad * 11 + microGrain * 2.2;
+                        // Dark glue seam right at r = 0.405..0.43
+                        if (rWorld > 0.405) {
+                            lum *= 0.55;
+                            rough = 68;
+                        } else {
+                            rough = 135 - capGrad * 22 + microGrain * 8;
+                        }
+                        bump = 128 + microGrain * 22;
+                    } else if (rWorld <= 1.25) {
+                        // Concave ribbed cone area: 12 sharp concentric ribs in deep carbon black
+                        const tCone = (rWorld - 0.43) / (1.25 - 0.43);
+                        const radialShade = Math.pow(tCone, 0.70);
+
+                        // 12 pronounced concentric ribs
+                        const ribCount = 12;
+                        const ribWave = Math.sin(tCone * Math.PI * 2.0 * ribCount - Math.PI * 0.5);
+                        const ribSharp = Math.pow(ribWave * 0.5 + 0.5, 1.45);
+
+                        lum = 6 + radialShade * 9 + ribSharp * 21 + microGrain * 2.5;
+                        rough = 185 - ribSharp * 115 + microGrain * 10;
+                        bump = 128 + ribWave * 88 + microGrain * 24;
+                    } else {
+                        // Outer triple-roll treated cloth accordion surround (1.25 to 1.41)
+                        const tSur = THREE.MathUtils.clamp((rWorld - 1.25) / (1.41 - 1.25), 0, 1);
+                        const rollWave = Math.abs(Math.sin(tSur * Math.PI * 2.0));
+                        lum = 7 + rollWave * 15 + microGrain * 1.5;
+                        rough = 78 - rollWave * 36;
+                        bump = 128 + Math.sin(tSur * Math.PI * 4.0) * 62;
+                    }
+
+                    const cVal = THREE.MathUtils.clamp(lum, 4, 46);
+                    cData[idx] = cVal;
+                    cData[idx + 1] = cVal;
+                    cData[idx + 2] = THREE.MathUtils.clamp(cVal * 1.02, 4, 48);
+                    cData[idx + 3] = 255;
+
+                    const rVal = THREE.MathUtils.clamp(rough, 38, 230);
+                    rData[idx] = rVal;
+                    rData[idx + 1] = rVal;
+                    rData[idx + 2] = rVal;
+                    rData[idx + 3] = 255;
+
+                    const bVal = THREE.MathUtils.clamp(bump, 0, 255);
+                    bData[idx] = bVal;
+                    bData[idx + 1] = bVal;
+                    bData[idx + 2] = bVal;
+                    bData[idx + 3] = 255;
+                }
+            }
+
+            cCtx.putImageData(cImg, 0, 0);
+            rCtx.putImageData(rImg, 0, 0);
+            bCtx.putImageData(bImg, 0, 0);
+
+            const colorMap = new THREE.CanvasTexture(colorCanvas);
+            colorMap.colorSpace = THREE.SRGBColorSpace;
+            colorMap.needsUpdate = true;
+
+            const roughnessMap = new THREE.CanvasTexture(roughCanvas);
+            roughnessMap.needsUpdate = true;
+
+            const bumpMap = new THREE.CanvasTexture(bumpCanvas);
+            bumpMap.needsUpdate = true;
+
+            return { colorMap, roughnessMap, bumpMap };
+        }
+
+        function createAluminumBadgeTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+
+            const grad = ctx.createLinearGradient(0, 0, 512, 512);
+            grad.addColorStop(0, '#cfd4da');
+            grad.addColorStop(0.5, '#f2f5f8');
+            grad.addColorStop(1, '#b8bec6');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 512, 512);
+
+            ctx.strokeStyle = 'rgba(0, 0, 0, 0.045)';
+            ctx.lineWidth = 1;
+            for (let y = 0; y < 512; y += 2) {
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(512, y);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = '#1d2024';
+            const cx = 256, cy = 225, s = 148;
+            ctx.fillRect(cx - s / 2, cy - s / 2, s, s);
+
+            ctx.strokeStyle = '#f2f5f8';
+            ctx.lineWidth = 11;
+            const rays = [
+                [cx - 74, cy + 62, cx + 12, cy - 74],
+                [cx - 74, cy + 62, cx + 74, cy - 40],
+                [cx - 74, cy + 62, cx + 74, cy + 18],
+                [cx - 74, cy + 12, cx - 18, cy - 74]
+            ];
+            for (const [x1, y1, x2, y2] of rays) {
+                ctx.beginPath();
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+            }
+
+            ctx.fillStyle = '#181a1d';
+            ctx.font = 'bold 52px Inter, Helvetica, Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('main', 256, 375);
+            ctx.font = '36px Inter, Helvetica, Arial, sans-serif';
+            ctx.fillText('a u d i o', 256, 420);
+
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            return tex;
+        }
+
+        function createBlackSpecPlateTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 280;
+            const ctx = canvas.getContext('2d');
+
+            ctx.fillStyle = '#101215';
+            ctx.fillRect(0, 0, 512, 280);
+
+            ctx.strokeStyle = '#5a6069';
+            ctx.lineWidth = 4;
+            ctx.strokeRect(14, 14, 484, 252);
+
+            ctx.fillStyle = '#e4e8ee';
+            ctx.fillRect(42, 48, 72, 72);
+
+            ctx.strokeStyle = '#101215';
+            ctx.lineWidth = 7;
+            ctx.beginPath();
+            ctx.moveTo(42, 120);
+            ctx.lineTo(114, 48);
+            ctx.moveTo(42, 120);
+            ctx.lineTo(114, 84);
+            ctx.stroke();
+
+            ctx.fillStyle = '#edf1f7';
+            ctx.font = 'bold 26px monospace';
+            ctx.fillText('MAIN AUDIO', 136, 74);
+            ctx.font = '18px monospace';
+            ctx.fillStyle = '#a0a7b2';
+            ctx.fillText('MODEL MA-12H MULTICELL', 136, 104);
+
+            ctx.strokeStyle = '#737982';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(42, 142, 428, 94);
+            ctx.beginPath();
+            ctx.moveTo(42, 189);
+            ctx.lineTo(470, 189);
+            ctx.moveTo(244, 142);
+            ctx.moveTo(244, 236);
+            ctx.stroke();
+
+            ctx.fillStyle = '#d8dde6';
+            ctx.font = '16px monospace';
+            ctx.fillText('IMPEDANCE: 8 OHMS', 58, 172);
+            ctx.fillText('SENS: 101 dB/W/m', 256, 172);
+            ctx.fillText('SERIAL: #0042-A', 58, 217);
+            ctx.fillText('HANDCRAFTED', 256, 217);
+
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            return tex;
+        }
+
+        function createDriverBackLabelTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 512;
+            const ctx = canvas.getContext('2d');
+
+            ctx.fillStyle = '#121417';
+            ctx.fillRect(0, 0, 512, 512);
+
+            ctx.strokeStyle = '#8b929c';
+            ctx.lineWidth = 8;
+            ctx.beginPath();
+            ctx.arc(256, 256, 220, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.fillStyle = '#e8ecf2';
+            ctx.fillRect(216, 148, 80, 72);
+            ctx.strokeStyle = '#121417';
+            ctx.lineWidth = 7;
+            ctx.beginPath();
+            ctx.moveTo(216, 220);
+            ctx.lineTo(282, 148);
+            ctx.moveTo(216, 220);
+            ctx.lineTo(296, 180);
+            ctx.stroke();
+
+            ctx.fillStyle = '#dce1e8';
+            ctx.font = 'bold 24px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText('HF COMPRESSION DRIVER', 256, 268);
+            ctx.font = '18px monospace';
+            ctx.fillStyle = '#9aa1ab';
+            ctx.fillText('ALNICO / NEODYMIUM SERIES', 256, 300);
+            ctx.fillText('8 OHM  •  800Hz - 20kHz', 256, 332);
+
+            const tex = new THREE.CanvasTexture(canvas);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.needsUpdate = true;
+            return tex;
+        }
+
+        /**
+         * Builds a single cell of the 4-column x 3-row multicellular horn matching the
+         * barrel-shaped front silhouette in the reference image (wider middle horizontal band,
+         * tapered top/bottom rows, convex horizontal arc, and deep exponential flare).
+         */
+        function createCurvedHornCellGeometry(colIndex, rowIndex, segmentsZ = 28) {
+            // colIndex in [-1.5, -0.5, 0.5, 1.5] (4 columns)
+            // rowIndex in [-1, 0, 1] (3 rows)
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const uvs = [];
+            const indices = [];
+
+            const frontZ = 1.62;
+            const backZ = -0.36;
+
+            // 4 columns across the curved front mouth
+            const anglePerCol = 0.195;
+            const radiusH = 4.25;
+
+            const theta0 = (colIndex - 0.5) * anglePerCol;
+            const theta1 = (colIndex + 0.5) * anglePerCol;
+
+            const cellHeightFront = 0.72;
+            const yCenterFront = rowIndex * cellHeightFront;
+
+            // Throat convergence dimensions (4 cols x 3 rows)
+            const throatCellW = 0.19;
+            const throatCellH = 0.23;
+
+            const frontWallThick = 0.028;
+            const backWallThick = 0.038;
+
+            const outerVerts = [];
+            const innerVerts = [];
+
+            for (let i = 0; i <= segmentsZ; i++) {
+                const t = i / segmentsZ;
+                const flare = Math.pow(1 - t, 1.52);
+                const zBase = THREE.MathUtils.lerp(frontZ, backZ, t);
+
+                // Side slot separation between horizontal tiers
+                const sideSlotGap = Math.sin(t * Math.PI) * 0.04;
+                const arcBlend = Math.pow(1 - t, 1.25);
+
+                const corners = [
+                    [-1, -1],
+                    [1, -1],
+                    [1, 1],
+                    [-1, 1]
+                ];
+
+                const ringOuter = [];
+                const ringInner = [];
+
+                for (let c = 0; c < 4; c++) {
+                    const cx = corners[c][0];
+                    const cy = corners[c][1];
+
+                    const yFrontOuter = yCenterFront + cy * (cellHeightFront * 0.5 - sideSlotGap * 0.32);
+
+                    // Barrel profile from front view: middle horizontal band is widest, top and bottom taper inward
+                    const yNorm = yFrontOuter / (1.5 * cellHeightFront); // [-1, +1]
+                    const barrelBulge = 1.04 - 0.13 * (yNorm * yNorm);
+
+                    const thetaOuter = (cx < 0 ? theta0 : theta1) * barrelBulge;
+                    const xFrontOuter = Math.sin(thetaOuter) * radiusH;
+                    const zArcOffsetOuter = (Math.cos(thetaOuter) - 1.0) * radiusH * arcBlend;
+                    const zVertArc = (1.0 - Math.cos(yFrontOuter * 0.24)) * -0.42 * arcBlend;
+
+                    const xBackOuter = colIndex * throatCellW + cx * (throatCellW * 0.5);
+                    const yBackOuter = rowIndex * throatCellH + cy * (throatCellH * 0.5);
+
+                    const xOut = THREE.MathUtils.lerp(xBackOuter, xFrontOuter, flare);
+                    const yOut = THREE.MathUtils.lerp(yBackOuter, yFrontOuter, flare) - (rowIndex !== 0 && cy * rowIndex < 0 ? sideSlotGap * 0.48 : 0);
+                    const zOut = zBase + zArcOffsetOuter + zVertArc;
+
+                    const wThick = THREE.MathUtils.lerp(frontWallThick, backWallThick, t);
+
+                    const xIn = xOut - cx * wThick * (1.0 + Math.abs(colIndex) * 0.06);
+                    const yIn = yOut - cy * wThick;
+                    const zIn = zOut;
+
+                    ringOuter.push(new THREE.Vector3(xOut, yOut, zOut));
+                    ringInner.push(new THREE.Vector3(xIn, yIn, zIn));
+                }
+
+                outerVerts.push(ringOuter);
+                innerVerts.push(ringInner);
+            }
+
+            function addQuad(v0, v1, v2, v3, u0 = 0, v_0 = 0, u1 = 1, v_1 = 1) {
+                const baseIdx = positions.length / 3;
+                positions.push(
+                    v0.x, v0.y, v0.z,
+                    v1.x, v1.y, v1.z,
+                    v2.x, v2.y, v2.z,
+                    v3.x, v3.y, v3.z
+                );
+                uvs.push(u0, v_0, u1, v_0, u1, v_1, u0, v_1);
+                indices.push(
+                    baseIdx, baseIdx + 1, baseIdx + 2,
+                    baseIdx, baseIdx + 2, baseIdx + 3
+                );
+            }
+
+            for (let i = 0; i < segmentsZ; i++) {
+                const v0 = i / segmentsZ;
+                const v1 = (i + 1) / segmentsZ;
+
+                for (let side = 0; side < 4; side++) {
+                    const nextSide = (side + 1) % 4;
+
+                    addQuad(
+                        outerVerts[i][side],
+                        outerVerts[i][nextSide],
+                        outerVerts[i + 1][nextSide],
+                        outerVerts[i + 1][side],
+                        side * 0.25, v0, (side + 1) * 0.25, v1
+                    );
+
+                    addQuad(
+                        innerVerts[i][nextSide],
+                        innerVerts[i][side],
+                        innerVerts[i + 1][side],
+                        innerVerts[i + 1][nextSide],
+                        side * 0.25, v0, (side + 1) * 0.25, v1
+                    );
+                }
+            }
+
+            for (let side = 0; side < 4; side++) {
+                const nextSide = (side + 1) % 4;
+                addQuad(
+                    innerVerts[0][side],
+                    innerVerts[0][nextSide],
+                    outerVerts[0][nextSide],
+                    outerVerts[0][side],
+                    0, 0, 1, 0.1
+                );
+                addQuad(
+                    outerVerts[segmentsZ][side],
+                    outerVerts[segmentsZ][nextSide],
+                    innerVerts[segmentsZ][nextSide],
+                    innerVerts[segmentsZ][side],
+                    0, 0, 1, 0.1
+                );
+            }
+
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+            geometry.setIndex(indices);
+            geometry.computeVertexNormals();
+            return geometry;
+        }
+
+        function createCountersunkScrew(material) {
+            const screwGroup = new THREE.Group();
+
+            const headGeo = new THREE.CylinderGeometry(0.052, 0.032, 0.022, 20);
+            headGeo.rotateX(Math.PI / 2);
+            const head = new THREE.Mesh(headGeo, material);
+            head.castShadow = true;
+            screwGroup.add(head);
+
+            const hexGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.024, 6);
+            hexGeo.rotateX(Math.PI / 2);
+            const darkMat = new THREE.MeshStandardMaterial({ color: 0x050608, roughness: 0.7, metalness: 0.5 });
+            const hex = new THREE.Mesh(hexGeo, darkMat);
+            hex.position.z = 0.003;
+            screwGroup.add(hex);
+
+            return screwGroup;
+        }
+
+        function createBindingPostPair(metalMat, redMat, blackMat) {
+            const group = new THREE.Group();
+
+            const plateGeo = new RoundedBoxGeometry(0.46, 0.03, 0.28, 3, 0.008);
+            const plate = new THREE.Mesh(plateGeo, blackMat);
+            plate.castShadow = true;
+            plate.receiveShadow = true;
+            group.add(plate);
+
+            const offsets = [-0.12, 0.12];
+            offsets.forEach((xOff, idx) => {
+                const postGroup = new THREE.Group();
+                postGroup.position.set(xOff, 0.015, 0);
+
+                const baseCollar = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.055, 0.06, 0.08, 24),
+                    metalMat
+                );
+                baseCollar.position.y = 0.04;
+                postGroup.add(baseCollar);
+
+                const insMat = idx === 0 ? redMat : blackMat;
+                const sleeve = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.068, 0.068, 0.14, 24),
+                    insMat
+                );
+                sleeve.position.y = 0.13;
+                sleeve.castShadow = true;
+                postGroup.add(sleeve);
+
+                const boot = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.048, 0.058, 0.16, 20),
+                    blackMat
+                );
+                boot.position.y = 0.25;
+                postGroup.add(boot);
+
+                const collar = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.038, 0.042, 0.06, 20),
+                    metalMat
+                );
+                collar.position.y = 0.35;
+                postGroup.add(collar);
+
+                group.add(postGroup);
+            });
+
+            return group;
+        }
+
+        /**
+         * Replicates the exact front and side geometry of the 12-inch professional woofer:
+         * - Zero protruding rear cylinders or LatheGeometry orientation flips that could cause side artifacts.
+         * - The entire acoustic diaphragm (central convex dust cap + deep concave 12-ribbed cone +
+         *   outer treated accordion surround) is constructed as ONE unified, continuous cylindrical
+         *   BufferGeometry in (x, y, z) coordinates with outward (+Z) normals and planar radial UVs.
+         * - Recessed flush into the front baffle cutout with an 8-bolt cast aluminum outer gasket ring.
+         */
+        function buildWooferAssembly(materials) {
+            const wooferGroup = new THREE.Group();
+
+            // 1. Cast-aluminum outer mounting rim / gasket flange sitting flush on the baffle
+            const outerR = 1.63;
+            const innerR = 1.40;
+            const flangeShape = new THREE.Shape();
+            flangeShape.absarc(0, 0, outerR, 0, Math.PI * 2, false);
+            const flangeHole = new THREE.Path();
+            flangeHole.absarc(0, 0, innerR, 0, Math.PI * 2, true);
+            flangeShape.holes.push(flangeHole);
+
+            const flangeGeo = new THREE.ExtrudeGeometry(flangeShape, {
+                depth: 0.055,
+                bevelEnabled: true,
+                bevelSegments: 4,
+                steps: 1,
+                bevelSize: 0.012,
+                bevelThickness: 0.012,
+                curveSegments: 96
+            });
+            const flangeMesh = new THREE.Mesh(flangeGeo, materials.wooferFrame);
+            flangeMesh.position.z = -0.008;
+            flangeMesh.castShadow = true;
+            flangeMesh.receiveShadow = true;
+            wooferGroup.add(flangeMesh);
+
+            // Inner stepped gasket lip around the surround perimeter
+            const innerStepShape = new THREE.Shape();
+            innerStepShape.absarc(0, 0, 1.435, 0, Math.PI * 2, false);
+            const innerStepHole = new THREE.Path();
+            innerStepHole.absarc(0, 0, 1.385, 0, Math.PI * 2, true);
+            innerStepShape.holes.push(innerStepHole);
+
+            const innerStepGeo = new THREE.ExtrudeGeometry(innerStepShape, {
+                depth: 0.038,
+                bevelEnabled: false,
+                curveSegments: 96
+            });
+            const innerStepMesh = new THREE.Mesh(innerStepGeo, materials.wooferFrame);
+            innerStepMesh.position.z = -0.005;
+            wooferGroup.add(innerStepMesh);
+
+            // 2. 8 Countersunk hex socket bolts evenly spaced around the mounting rim
+            const boltRadius = 1.515;
+            for (let i = 0; i < 8; i++) {
+                const angle = (i / 8) * Math.PI * 2;
+                const screw = createCountersunkScrew(materials.blackHardware);
+                screw.position.set(
+                    Math.cos(angle) * boltRadius,
+                    Math.sin(angle) * boltRadius,
+                    0.052
+                );
+                wooferGroup.add(screw);
+            }
+
+            // 3. UNIFIED CONTINUOUS DIAPHRAGM GEOMETRY (Dust Cap + Concave Ribbed Cone + Accordion Surround)
+            // Built directly in (x, y, z) so it is 100% impossible for any part to stick out sideways or invert.
+            const radialSegments = 128;
+            const ringSegments = 180;
+            const maxRadius = 1.40;
+
+            const rCapEdge = 0.425;      // Outer radius of central convex dust cap
+            const rConeEdge = 1.255;     // Outer radius of concave ribbed paper cone
+            const zThroatNeck = -0.49;   // Deepest point where dust cap meets the concave cone throat
+            const zCapApex = -0.27;      // Peak of the central convex dust cap (still recessed inside the cabinet!)
+            const zConeRim = -0.028;     // Outer edge of the cone where it meets the surround
+
+            const positions = [];
+            const uvs = [];
+            const indices = [];
+
+            for (let i = 0; i <= ringSegments; i++) {
+                const s = i / ringSegments;
+                const r = s * maxRadius;
+                let z = 0;
+
+                if (r <= rCapEdge) {
+                    // Region A: Central Convex Spherical Dust Cap (r: 0 -> 0.425)
+                    const tCap = r / rCapEdge;
+                    const sphereProfile = Math.sqrt(Math.max(0, 1.0 - tCap * tCap * 0.68));
+                    const sphereBase = Math.sqrt(1.0 - 0.68);
+                    const normDoming = (sphereProfile - sphereBase) / (1.0 - sphereBase);
+                    z = zThroatNeck + normDoming * (zCapApex - zThroatNeck);
+
+                    // Subtle recessed crease right at the dust cap glue joint
+                    if (tCap > 0.94) {
+                        const crease = Math.sin(((tCap - 0.94) / 0.06) * Math.PI);
+                        z -= crease * 0.010;
+                    }
+                } else if (r <= rConeEdge) {
+                    // Region B: Concave Exponential Ribbed Cone (r: 0.425 -> 1.255)
+                    const tCone = (r - rCapEdge) / (rConeEdge - rCapEdge);
+                    // Curving smoothly from zThroatNeck (-0.49) outward toward the viewer at zConeRim (-0.028)
+                    const flare = Math.pow(tCone, 0.78);
+                    const zBase = THREE.MathUtils.lerp(zThroatNeck, zConeRim, flare);
+
+                    // 12 crisp concentric acoustic ribs along the cone wall
+                    const ribCount = 12;
+                    const ribEnvelope = Math.sin(Math.pow(tCone, 0.85) * Math.PI);
+                    const ribWave = Math.sin(tCone * Math.PI * 2.0 * ribCount - Math.PI * 0.5);
+                    const ribOffset = ribWave * 0.0125 * ribEnvelope;
+
+                    z = zBase + ribOffset;
+                } else {
+                    // Region C: Double-Roll Damped Accordion Surround (r: 1.255 -> 1.40)
+                    const tSur = (r - rConeEdge) / (maxRadius - rConeEdge);
+                    const zBase = THREE.MathUtils.lerp(zConeRim, 0.002, tSur);
+                    // Two distinct positive rolls that never exceed z = +0.022 (staying below the outer gasket rim)
+                    const roll = Math.abs(Math.sin(tSur * Math.PI * 2.0)) * 0.020 * Math.sin(tSur * Math.PI);
+                    z = zBase + roll;
+                }
+
+                for (let j = 0; j <= radialSegments; j++) {
+                    const theta = (j / radialSegments) * Math.PI * 2;
+                    const cosT = Math.cos(theta);
+                    const sinT = Math.sin(theta);
+
+                    const x = r * cosT;
+                    const y = r * sinT;
+                    positions.push(x, y, z);
+
+                    const uvR = (r / 1.41) * 0.48;
+                    uvs.push(0.5 + uvR * cosT, 0.5 + uvR * sinT);
+                }
+            }
+
+            const stride = radialSegments + 1;
+            for (let i = 0; i < ringSegments; i++) {
+                for (let j = 0; j < radialSegments; j++) {
+                    const a = i * stride + j;
+                    const b = (i + 1) * stride + j;
+                    const c = (i + 1) * stride + (j + 1);
+                    const d = i * stride + (j + 1);
+
+                    // Counter-clockwise winding in XY plane so all normals point strictly toward +Z
+                    indices.push(a, b, d);
+                    indices.push(b, c, d);
+                }
+            }
+
+            const diaphragmGeo = new THREE.BufferGeometry();
+            diaphragmGeo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            diaphragmGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+            diaphragmGeo.setIndex(indices);
+            diaphragmGeo.computeVertexNormals();
+
+            const diaphragmMesh = new THREE.Mesh(diaphragmGeo, materials.wooferCone);
+            diaphragmMesh.castShadow = true;
+            diaphragmMesh.receiveShadow = true;
+            wooferGroup.add(diaphragmMesh);
+
+            return wooferGroup;
+        }
+
+        function buildMulticellularHornSystem(materials) {
+            const hornSystem = new THREE.Group();
+
+            const hornCenterY = 1.18;
+            const hornMouthGroup = new THREE.Group();
+            hornMouthGroup.position.set(0, hornCenterY, 0.18);
+
+            // 1. Generate all 12 curved cells (4 columns x 3 rows) matching the front reference image
+            const cols = [-1.5, -0.5, 0.5, 1.5];
+            const rows = [-1, 0, 1];
+            for (const row of rows) {
+                for (const col of cols) {
+                    const cellGeo = createCurvedHornCellGeometry(col, row, 28);
+                    const cellMesh = new THREE.Mesh(cellGeo, materials.orangeHorn);
+                    cellMesh.castShadow = true;
+                    cellMesh.receiveShadow = true;
+                    hornMouthGroup.add(cellMesh);
+                }
+            }
+
+            // 2. Dark acoustic throat shadow damper deep inside the horn convergence zone
+            const throatDamper = new THREE.Mesh(
+                new THREE.BoxGeometry(0.72, 0.66, 0.12),
+                materials.cavityBlack
+            );
+            throatDamper.position.set(0, 0, -0.34);
+            hornMouthGroup.add(throatDamper);
+
+            // 3. Cast metallic-orange throat neck extending backward to the compression driver
+            const neckGroup = new THREE.Group();
+
+            const manifoldGeo = new THREE.CylinderGeometry(0.42, 0.56, 0.58, 8);
+            manifoldGeo.rotateX(Math.PI / 2);
+            manifoldGeo.rotateZ(Math.PI / 8);
+            const manifold = new THREE.Mesh(manifoldGeo, materials.orangeHorn);
+            manifold.position.set(0, 0, -0.58);
+            manifold.castShadow = true;
+            manifold.receiveShadow = true;
+            neckGroup.add(manifold);
+
+            const tubeGeo = new THREE.CylinderGeometry(0.36, 0.42, 0.55, 36);
+            tubeGeo.rotateX(Math.PI / 2);
+            const tube = new THREE.Mesh(tubeGeo, materials.orangeHorn);
+            tube.position.set(0, 0, -1.05);
+            tube.castShadow = true;
+            tube.receiveShadow = true;
+            neckGroup.add(tube);
+
+            const topRibGeo = new THREE.BoxGeometry(0.18, 0.12, 0.92);
+            const topRib = new THREE.Mesh(topRibGeo, materials.orangeHorn);
+            topRib.position.set(0, 0.36, -0.78);
+            topRib.castShadow = true;
+            neckGroup.add(topRib);
+
+            const rearFlangeGeo = new THREE.CylinderGeometry(0.56, 0.56, 0.11, 40);
+            rearFlangeGeo.rotateX(Math.PI / 2);
+            const rearFlange = new THREE.Mesh(rearFlangeGeo, materials.orangeHorn);
+            rearFlange.position.set(0, 0, -1.32);
+            rearFlange.castShadow = true;
+            rearFlange.receiveShadow = true;
+            neckGroup.add(rearFlange);
+
+            hornMouthGroup.add(neckGroup);
+            hornSystem.add(hornMouthGroup);
+
+            // 4. Front L-shaped mounting feet + black isolator pads bolted to the blue cabinet top
+            const footPositionsX = [-1.26, 1.26];
+            footPositionsX.forEach((fx) => {
+                const footGroup = new THREE.Group();
+                footGroup.position.set(fx, 0, 1.48);
+
+                const vLeg = new THREE.Mesh(
+                    new RoundedBoxGeometry(0.28, 0.20, 0.08, 3, 0.015),
+                    materials.orangeHorn
+                );
+                vLeg.position.set(0, 0.10, 0);
+                vLeg.castShadow = true;
+                footGroup.add(vLeg);
+
+                const hTab = new THREE.Mesh(
+                    new RoundedBoxGeometry(0.36, 0.055, 0.32, 3, 0.015),
+                    materials.orangeHorn
+                );
+                hTab.position.set(fx > 0 ? 0.03 : -0.03, 0.027, -0.08);
+                hTab.castShadow = true;
+                hTab.receiveShadow = true;
+                footGroup.add(hTab);
+
+                const bolt = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.058, 0.058, 0.065, 6),
+                    materials.blackHardware
+                );
+                bolt.position.set(fx > 0 ? 0.05 : -0.05, 0.068, -0.10);
+                bolt.castShadow = true;
+                footGroup.add(bolt);
+
+                hornSystem.add(footGroup);
+            });
+
+            // 5. Rear vertical support bracket under the throat flange
+            const rearSupportGroup = new THREE.Group();
+            rearSupportGroup.position.set(0, 0, -1.14);
+
+            const standGeo = new RoundedBoxGeometry(0.96, 1.14, 0.11, 4, 0.02);
+            const standMesh = new THREE.Mesh(standGeo, materials.orangeHorn);
+            standMesh.position.set(0, 0.57, 0);
+            standMesh.castShadow = true;
+            standMesh.receiveShadow = true;
+            rearSupportGroup.add(standMesh);
+
+            const basePlateGeo = new RoundedBoxGeometry(1.28, 0.065, 0.44, 4, 0.02);
+            const basePlate = new THREE.Mesh(basePlateGeo, materials.orangeHorn);
+            basePlate.position.set(0, 0.032, 0.06);
+            basePlate.castShadow = true;
+            basePlate.receiveShadow = true;
+            rearSupportGroup.add(basePlate);
+
+            const supportBolts = [
+                [-0.50, 0.16],
+                [-0.50, -0.05],
+                [0.50, 0.16],
+                [0.50, -0.05]
+            ];
+            supportBolts.forEach(([bx, bz]) => {
+                const b = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.05, 0.05, 0.06, 12),
+                    materials.blackHardware
+                );
+                b.position.set(bx, 0.075, bz);
+                b.castShadow = true;
+                rearSupportGroup.add(b);
+            });
+
+            hornSystem.add(rearSupportGroup);
+
+            // 6. Heavy-duty Black Anodized Compression Driver bolted to the rear of the horn
+            const driverGroup = new THREE.Group();
+            driverGroup.position.set(0, hornCenterY, -1.22);
+
+            const dFlange = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.55, 0.55, 0.10, 48).rotateX(Math.PI / 2),
+                materials.driverBlack
+            );
+            dFlange.position.z = -0.05;
+            dFlange.castShadow = true;
+            driverGroup.add(dFlange);
+
+            for (let i = 0; i < 6; i++) {
+                const a = (i / 6) * Math.PI * 2 + Math.PI / 6;
+                const bolt = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.028, 0.028, 0.14, 12).rotateX(Math.PI / 2),
+                    materials.chromeMetal
+                );
+                bolt.position.set(Math.cos(a) * 0.47, Math.sin(a) * 0.47, -0.06);
+                driverGroup.add(bolt);
+            }
+
+            for (let f = 0; f < 4; f++) {
+                const finRadius = 0.53 - f * 0.015;
+                const fin = new THREE.Mesh(
+                    new THREE.CylinderGeometry(finRadius, finRadius, 0.055, 48).rotateX(Math.PI / 2),
+                    materials.driverBlack
+                );
+                fin.position.z = -0.14 - f * 0.075;
+                fin.castShadow = true;
+                driverGroup.add(fin);
+            }
+
+            const magnetCore = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.47, 0.44, 0.36, 48).rotateX(Math.PI / 2),
+                materials.driverBlack
+            );
+            magnetCore.position.z = -0.28;
+            magnetCore.castShadow = true;
+            driverGroup.add(magnetCore);
+
+            const rearCap = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.38, 0.44, 0.12, 48).rotateX(Math.PI / 2),
+                materials.driverBlack
+            );
+            rearCap.position.z = -0.50;
+            rearCap.castShadow = true;
+            driverGroup.add(rearCap);
+
+            const rearBadge = new THREE.Mesh(
+                new THREE.CircleGeometry(0.32, 48),
+                materials.driverBackLabel
+            );
+            rearBadge.rotation.y = Math.PI;
+            rearBadge.position.z = -0.562;
+            driverGroup.add(rearBadge);
+
+            [-1, 1].forEach((side) => {
+                const term = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.055, 0.055, 0.12, 16).rotateZ(Math.PI / 2),
+                    materials.chromeMetal
+                );
+                term.position.set(side * 0.51, -0.06, -0.28);
+                driverGroup.add(term);
+            });
+
+            hornSystem.add(driverGroup);
+
+            // 7. Dual Binding Posts on top rear of cabinet & Curved Jumper Cables
+            const leftPosts = createBindingPostPair(
+                materials.chromeMetal,
+                materials.terminalRed,
+                materials.blackHardware
+            );
+            leftPosts.position.set(-0.92, 0, -1.35);
+            hornSystem.add(leftPosts);
+
+            const rightPosts = createBindingPostPair(
+                materials.chromeMetal,
+                materials.terminalRed,
+                materials.blackHardware
+            );
+            rightPosts.position.set(0.92, 0, -1.35);
+            hornSystem.add(rightPosts);
+
+            [-1, 1].forEach((side) => {
+                const curve = new THREE.CatmullRomCurve3([
+                    new THREE.Vector3(side * 0.54, hornCenterY - 0.06, -1.50),
+                    new THREE.Vector3(side * 0.88, hornCenterY - 0.12, -1.62),
+                    new THREE.Vector3(side * 0.98, 0.72, -1.56),
+                    new THREE.Vector3(side * 0.92, 0.36, -1.35)
+                ]);
+                const cableGeo = new THREE.TubeGeometry(curve, 36, 0.036, 16, false);
+                const cableMesh = new THREE.Mesh(cableGeo, materials.cableJacket);
+                cableMesh.castShadow = true;
+                hornSystem.add(cableMesh);
+
+                const branchCurve = new THREE.CatmullRomCurve3([
+                    new THREE.Vector3(side * 0.95, 0.58, -1.48),
+                    new THREE.Vector3(side * 0.80, 0.44, -1.40),
+                    new THREE.Vector3(side * 0.80, 0.32, -1.35)
+                ]);
+                const branchGeo = new THREE.TubeGeometry(branchCurve, 20, 0.024, 12, false);
+                const branchMesh = new THREE.Mesh(branchGeo, materials.cableJacket);
+                branchMesh.castShadow = true;
+                hornSystem.add(branchMesh);
+            });
+
+            return hornSystem;
+        }
+
+        export function createMainAudioSpeaker() {
+            const speakerRoot = new THREE.Group();
+            speakerRoot.name = 'MainAudioSpeaker';
+
+            // Procedural textures & radial cone maps
+            const paintMicroBump = createMetallicGrainTexture(512, 0.85, 1.35, 5);
+            const plasticMoldedBump = createMetallicGrainTexture(512, 0.55, 1.8, 6);
+            const coneMaps = createRadialWooferConeMaps(1024);
+
+            const silverBadgeTex = createAluminumBadgeTexture();
+            const blackPlateTex = createBlackSpecPlateTexture();
+            const driverLabelTex = createDriverBackLabelTexture();
+
+            // Pure RGB-calibrated PBR Materials without white IBL washout:
+            // - Horn: Deep vibrant red-orange glossy plastic (rgb(255, 34, 0)) with sharp specular clearcoat
+            // - Cabinet: Rich saturated cerulean blue (rgb(20, 138, 235)) with low specular glare so the blue stays deep
+            const materials = {
+                cabinetBlue: new THREE.MeshPhysicalMaterial({
+                    color: new THREE.Color().setRGB(20 / 255, 138 / 255, 235 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.58,
+                    metalness: 0.0,
+                    specularIntensity: 0.22,
+                     specularColor: new THREE.Color(0xd8ecff),
+                    clearcoat: 0.0,
+                    envMapIntensity: 0.12,
+                    bumpMap: paintMicroBump,
+                    bumpScale: 0.0045
+                }),
+                orangeHorn: new THREE.MeshPhysicalMaterial({
+                    color: new THREE.Color().setRGB(255 / 255, 32 / 255, 0 / 255, THREE.SRGBColorSpace),
+                    emissive: new THREE.Color().setRGB(45 / 255, 3 / 255, 0 / 255, THREE.SRGBColorSpace),
+                    emissiveIntensity: 0.32,
+                    roughness: 0.14,
+                    metalness: 0.0,
+                    ior: 1.54,
+                    specularIntensity: 1.0,
+                    specularColor: new THREE.Color(0xffffff),
+                    clearcoat: 1.0,
+                    clearcoatRoughness: 0.04,
+                    envMapIntensity: 0.45,
+                    bumpMap: plasticMoldedBump,
+                    bumpScale: 0.0035
+                }),
+                wooferFrame: new THREE.MeshPhysicalMaterial({
+                    color: new THREE.Color().setRGB(12 / 255, 13 / 255, 15 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.34,
+                    metalness: 0.55,
+                    clearcoat: 0.15,
+                    clearcoatRoughness: 0.28,
+                    envMapIntensity: 0.35,
+                    bumpMap: paintMicroBump,
+                    bumpScale: 0.003
+                }),
+                wooferCone: new THREE.MeshPhysicalMaterial({
+                    color: new THREE.Color().setRGB(210 / 255, 210 / 255, 214 / 255, THREE.SRGBColorSpace),
+                    map: coneMaps.colorMap,
+                    roughnessMap: coneMaps.roughnessMap,
+                    bumpMap: coneMaps.bumpMap,
+                    bumpScale: 0.024,
+                    roughness: 0.56,
+                    metalness: 0.08,
+                    specularIntensity: 0.65,
+                    clearcoat: 0.22,
+                    clearcoatRoughness: 0.32,
+                    envMapIntensity: 0.25,
+                    side: THREE.FrontSide
+                }),
+                cavityBlack: new THREE.MeshBasicMaterial({
+                    color: 0x020304
+                }),
+                blackHardware: new THREE.MeshStandardMaterial({
+                    color: new THREE.Color().setRGB(12 / 255, 13 / 255, 16 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.28,
+                    metalness: 0.85,
+                    envMapIntensity: 0.4
+                }),
+                driverBlack: new THREE.MeshPhysicalMaterial({
+                    color: new THREE.Color().setRGB(14 / 255, 16 / 255, 19 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.24,
+                    metalness: 0.78,
+                    clearcoat: 0.35,
+                    clearcoatRoughness: 0.18,
+                    envMapIntensity: 0.45,
+                    bumpMap: paintMicroBump,
+                    bumpScale: 0.005
+                }),
+                chromeMetal: new THREE.MeshStandardMaterial({
+                    color: new THREE.Color().setRGB(220 / 255, 226 / 255, 235 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.16,
+                    metalness: 0.94,
+                    envMapIntensity: 0.65
+                }),
+                terminalRed: new THREE.MeshStandardMaterial({
+                    color: new THREE.Color().setRGB(225 / 255, 18 / 255, 10 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.22,
+                    metalness: 0.2
+                }),
+                cableJacket: new THREE.MeshStandardMaterial({
+                    color: new THREE.Color().setRGB(14 / 255, 15 / 255, 18 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.36,
+                    metalness: 0.15
+                }),
+                silverBadge: new THREE.MeshStandardMaterial({
+                    map: silverBadgeTex,
+                    roughness: 0.22,
+                    metalness: 0.85,
+                    envMapIntensity: 0.45
+                }),
+                blackSpecPlate: new THREE.MeshStandardMaterial({
+                    map: blackPlateTex,
+                    roughness: 0.28,
+                    metalness: 0.65,
+                    envMapIntensity: 0.35
+                }),
+                driverBackLabel: new THREE.MeshStandardMaterial({
+                    map: driverLabelTex,
+                    roughness: 0.30,
+                    metalness: 0.60,
+                    envMapIntensity: 0.35
+                }),
+                rubberFoot: new THREE.MeshStandardMaterial({
+                    color: new THREE.Color().setRGB(10 / 255, 11 / 255, 13 / 255, THREE.SRGBColorSpace),
+                    roughness: 0.85,
+                    metalness: 0.05
+                })
+            };
+
+            // ====================================================================
+            // 1. BLUE BASS REFLEX CABINET ENCLOSURE (TRUE HOLLOW CARCASS + BAFFLE)
+            // ====================================================================
+            const cabWidth = 4.25;
+            const cabHeight = 6.64; // Matches the 1 : 1.5625 width-to-height ratio of the front reference photo
+            const cabDepth = 3.95;
+            const wallThick = 0.24;
+            const footHeight = 0.09;
+            const cabCenterY = footHeight + cabHeight / 2;
+
+            // Vertical positions calibrated to the taller 1:1.5625 cabinet front view
+            // (preserving exact woofer diameter, port width, and horn dimensions)
+            const wooferCenterY = 0.42;
+            const wooferCutoutRadius = 1.41;
+            const portWidth = 2.42;
+            const portHeight = 0.34;
+            const portY = -1.92;
+
+            const cabinetGroup = new THREE.Group();
+            cabinetGroup.position.set(0, cabCenterY, 0);
+
+            // A. True hollow carcass walls (Left, Right, Top, Bottom, Back) so the interior is genuinely hollow
+            // and never intersects or clips the concave woofer cone from any side or angle!
+            const rearCarcassDepth = cabDepth - wallThick;
+            const rearZCenter = -wallThick / 2;
+
+            // Left & Right side walls
+            const sideWallGeo = new RoundedBoxGeometry(wallThick, cabHeight, rearCarcassDepth, 4, 0.032);
+            [-1, 1].forEach((dir) => {
+                const sideWall = new THREE.Mesh(sideWallGeo, materials.cabinetBlue);
+                sideWall.position.set(dir * (cabWidth / 2 - wallThick / 2), 0, rearZCenter);
+                sideWall.castShadow = true;
+                sideWall.receiveShadow = true;
+                cabinetGroup.add(sideWall);
+            });
+
+            // Top & Bottom walls
+            const horizWallGeo = new RoundedBoxGeometry(cabWidth - wallThick * 0.4, wallThick, rearCarcassDepth, 4, 0.032);
+            [-1, 1].forEach((dir) => {
+                const hWall = new THREE.Mesh(horizWallGeo, materials.cabinetBlue);
+                hWall.position.set(0, dir * (cabHeight / 2 - wallThick / 2), rearZCenter);
+                hWall.castShadow = true;
+                hWall.receiveShadow = true;
+                cabinetGroup.add(hWall);
+            });
+
+            // Back wall
+            const backWallGeo = new RoundedBoxGeometry(cabWidth - wallThick * 0.4, cabHeight - wallThick * 0.4, wallThick, 4, 0.032);
+            const backWall = new THREE.Mesh(backWallGeo, materials.cabinetBlue);
+            backWall.position.set(0, 0, -cabDepth / 2 + wallThick / 2);
+            backWall.castShadow = true;
+            backWall.receiveShadow = true;
+            cabinetGroup.add(backWall);
+
+            // Matte-black inner acoustic lining box inside the hollow cavity so looking through the port or cone is pitch-dark
+            const innerLiningGeo = new THREE.BoxGeometry(
+                cabWidth - wallThick * 2.05,
+                cabHeight - wallThick * 2.05,
+                rearCarcassDepth - wallThick * 1.2
+            );
+            const innerLiningMat = new THREE.MeshBasicMaterial({ color: 0x020304, side: THREE.BackSide });
+            const innerLining = new THREE.Mesh(innerLiningGeo, innerLiningMat);
+            innerLining.position.set(0, 0, rearZCenter + wallThick * 0.4);
+            cabinetGroup.add(innerLining);
+
+            // B. Perforated Front Baffle with TRUE circular woofer hole and rectangular bass-reflex slot hole
+            const hw = cabWidth / 2 - 0.016;
+            const hh = cabHeight / 2 - 0.016;
+            const rCorner = 0.036;
+
+            const baffleShape = new THREE.Shape();
+            baffleShape.moveTo(-hw + rCorner, -hh);
+            baffleShape.lineTo(hw - rCorner, -hh);
+            baffleShape.quadraticCurveTo(hw, -hh, hw, -hh + rCorner);
+            baffleShape.lineTo(hw, hh - rCorner);
+            baffleShape.quadraticCurveTo(hw, hh, hw - rCorner, hh);
+            baffleShape.lineTo(-hw + rCorner, hh);
+            baffleShape.quadraticCurveTo(-hw, hh, -hw, hh - rCorner);
+            baffleShape.lineTo(-hw, -hh + rCorner);
+            baffleShape.quadraticCurveTo(-hw, -hh, -hw + rCorner, -hh);
+
+            // Hole 1: Circular cutout for the 12-inch concave woofer
+            const wooferHolePath = new THREE.Path();
+            wooferHolePath.absarc(0, wooferCenterY, wooferCutoutRadius, 0, Math.PI * 2, true);
+            baffleShape.holes.push(wooferHolePath);
+
+            // Hole 2: Rectangular slot cutout for the bass-reflex port
+            const pw = portWidth / 2;
+            const ph = portHeight / 2;
+            const portHolePath = new THREE.Path();
+            portHolePath.moveTo(-pw, portY - ph);
+            portHolePath.lineTo(-pw, portY + ph);
+            portHolePath.lineTo(pw, portY + ph);
+            portHolePath.lineTo(pw, portY - ph);
+            portHolePath.closePath();
+            baffleShape.holes.push(portHolePath);
+
+            const frontBaffleGeo = new THREE.ExtrudeGeometry(baffleShape, {
+                depth: wallThick,
+                bevelEnabled: true,
+                bevelSegments: 4,
+                steps: 1,
+                bevelSize: 0.016,
+                bevelThickness: 0.016,
+                curveSegments: 96
+            });
+            const frontBaffleMesh = new THREE.Mesh(frontBaffleGeo, materials.cabinetBlue);
+            frontBaffleMesh.position.z = cabDepth / 2 - wallThick - 0.016;
+            frontBaffleMesh.castShadow = true;
+            frontBaffleMesh.receiveShadow = true;
+            cabinetGroup.add(frontBaffleMesh);
+
+            // C. Mount the Unified Concave 12-inch Woofer flush on the perforated front baffle opening
+            const woofer = buildWooferAssembly(materials);
+            woofer.position.set(0, wooferCenterY, cabDepth / 2);
+            cabinetGroup.add(woofer);
+
+            // D. Internal bass-reflex port shelf walls inside the hollow cabinet
+            const portTunnelGeo = new THREE.BoxGeometry(portWidth + 0.08, portHeight + 0.08, 1.45);
+            const portTunnelMat = new THREE.MeshBasicMaterial({ color: 0x010102, side: THREE.BackSide });
+            const portTunnel = new THREE.Mesh(portTunnelGeo, portTunnelMat);
+            portTunnel.position.set(0, portY, cabDepth / 2 - 0.74);
+            cabinetGroup.add(portTunnel);
+
+            // 4. Top-Left Brushed Aluminum Logo Plate ("main audio")
+            const badgeGroup = new THREE.Group();
+            badgeGroup.position.set(-1.58, cabHeight / 2 - 0.48, cabDepth / 2 + 0.010);
+
+            const badgePlate = new THREE.Mesh(
+                new RoundedBoxGeometry(0.56, 0.52, 0.022, 2, 0.008),
+                materials.silverBadge
+            );
+            badgePlate.castShadow = true;
+            badgeGroup.add(badgePlate);
+
+            const badgePinOffsets = [
+                [-0.22, 0.20],
+                [0.22, 0.20],
+                [-0.22, -0.20],
+                [0.22, -0.20]
+            ];
+            badgePinOffsets.forEach(([px, py]) => {
+                const pin = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.018, 0.018, 0.028, 12).rotateX(Math.PI / 2),
+                    materials.blackHardware
+                );
+                pin.position.set(px, py, 0.004);
+                badgeGroup.add(pin);
+            });
+            cabinetGroup.add(badgeGroup);
+
+            // 5. Black anodized technical specification plates
+            function createSpecPlateMesh() {
+                const pGroup = new THREE.Group();
+                const plate = new THREE.Mesh(
+                    new RoundedBoxGeometry(0.64, 0.34, 0.02, 2, 0.006),
+                    materials.blackSpecPlate
+                );
+                plate.castShadow = true;
+                pGroup.add(plate);
+
+                const rivets = [
+                    [-0.27, 0.13],
+                    [0.27, 0.13],
+                    [-0.27, -0.13],
+                    [0.27, -0.13]
+                ];
+                rivets.forEach(([rx, ry]) => {
+                    const r = new THREE.Mesh(
+                        new THREE.CylinderGeometry(0.014, 0.014, 0.025, 10).rotateX(Math.PI / 2),
+                        materials.chromeMetal
+                    );
+                    r.position.set(rx, ry, 0.004);
+                    pGroup.add(r);
+                });
+                return pGroup;
+            }
+
+            const frontSpecPlate = createSpecPlateMesh();
+            frontSpecPlate.position.set(-1.54, -cabHeight / 2 + 0.42, cabDepth / 2 + 0.010);
+            cabinetGroup.add(frontSpecPlate);
+
+            const rearSpecPlate = createSpecPlateMesh();
+            rearSpecPlate.rotation.y = Math.PI;
+            rearSpecPlate.position.set(-1.38, -cabHeight / 2 + 0.52, -cabDepth / 2 - 0.008);
+            cabinetGroup.add(rearSpecPlate);
+
+            const sideSpecPlate = createSpecPlateMesh();
+            sideSpecPlate.rotation.y = Math.PI / 2;
+            sideSpecPlate.position.set(cabWidth / 2 + 0.008, -cabHeight / 2 + 0.52, 1.32);
+            cabinetGroup.add(sideSpecPlate);
+
+            // 6. Top Cabinet 4 Corner Countersunk Screws
+            const topCornerOffsets = [
+                [-cabWidth / 2 + 0.24, -cabDepth / 2 + 0.24],
+                [cabWidth / 2 - 0.24, -cabDepth / 2 + 0.24],
+                [-cabWidth / 2 + 0.24, cabDepth / 2 - 0.24],
+                [cabWidth / 2 - 0.24, cabDepth / 2 - 0.24]
+            ];
+            topCornerOffsets.forEach(([tx, tz]) => {
+                const topScrew = createCountersunkScrew(materials.blackHardware);
+                topScrew.rotation.x = -Math.PI / 2;
+                topScrew.position.set(tx, cabHeight / 2 + 0.002, tz);
+                cabinetGroup.add(topScrew);
+            });
+
+            // 7. Side Panel Vertical Edge Countersunk Screws
+            const sideScrewY = [-2.85, -0.95, 0.95, 2.85];
+            const sideScrewZ = [-cabDepth / 2 + 0.22, cabDepth / 2 - 0.22];
+            [-1, 1].forEach((sideDir) => {
+                sideScrewZ.forEach((sz) => {
+                    sideScrewY.forEach((sy) => {
+                        const sScrew = createCountersunkScrew(materials.blackHardware);
+                        sScrew.rotation.y = (sideDir * Math.PI) / 2;
+                        sScrew.position.set(sideDir * (cabWidth / 2 + 0.002), sy, sz);
+                        cabinetGroup.add(sScrew);
+                    });
+                });
+            });
+
+            // 8. 4 Low-profile Rubber Feet at the base of the cabinet
+            const footOffsets = [
+                [-cabWidth / 2 + 0.45, -cabDepth / 2 + 0.45],
+                [cabWidth / 2 - 0.45, -cabDepth / 2 + 0.45],
+                [-cabWidth / 2 + 0.45, cabDepth / 2 - 0.45],
+                [cabWidth / 2 - 0.45, cabDepth / 2 - 0.45]
+            ];
+            footOffsets.forEach(([fx, fz]) => {
+                const foot = new THREE.Mesh(
+                    new THREE.CylinderGeometry(0.24, 0.22, footHeight, 24),
+                    materials.rubberFoot
+                );
+                foot.position.set(fx, -cabHeight / 2 - footHeight / 2, fz);
+                foot.castShadow = true;
+                foot.receiveShadow = true;
+                cabinetGroup.add(foot);
+            });
+
+            speakerRoot.add(cabinetGroup);
+
+            // ====================================================================
+            // 2. TOP ORANGE 4x3 MULTICELLULAR HORN & DRIVER SYSTEM
+            // ====================================================================
+            const hornAssembly = buildMulticellularHornSystem(materials);
+            hornAssembly.position.set(0, footHeight + cabHeight, 0);
+            speakerRoot.add(hornAssembly);
+
+            speakerRoot.position.y = -4.30;
+
+            return speakerRoot;
+        }
+
+        async function initScene() {
+            const container = document.getElementById('speaker-viewport');
+
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color('#d7d9de');
+
+            const camera = new THREE.PerspectiveCamera(
+                32,
+                window.innerWidth / window.innerHeight,
+                0.1,
+                100
+            );
+            // Front-biased studio perspective to immediately showcase the taller cabinet, concave ribbed cone & 4x3 horn
+            camera.position.set(3.8, 1.8, 14.4);
+
+            const renderer = new THREE.WebGPURenderer({
+                antialias: true,
+                powerPreference: 'high-performance'
+            });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            // Direct sRGB output without washed-out filmic/neutral desaturation
+            renderer.toneMapping = THREE.NoToneMapping;
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            await renderer.init();
+
+            // Subtle environment reflection only for crisp glossy highlights on the horn (prevents grey IBL washout)
+            const pmremGenerator = new THREE.PMREMGenerator(renderer);
+            const roomEnv = new RoomEnvironment();
+            scene.environment = pmremGenerator.fromScene(roomEnv, 0.02).texture;
+            scene.environmentIntensity = 0.22;
+
+            // Controlled studio ambient fill so shadows keep rich color saturation
+            const ambientLight = new THREE.HemisphereLight(0xffffff, 0x8c96a6, 0.42);
+            scene.add(ambientLight);
+
+            // 1. Main Studio Key Light
+            const keyLight = new THREE.DirectionalLight(0xffffff, 1.55);
+            keyLight.position.set(5.2, 11.0, 10.0);
+            keyLight.castShadow = true;
+            keyLight.shadow.mapSize.width = 2048;
+            keyLight.shadow.mapSize.height = 2048;
+            keyLight.shadow.camera.near = 2;
+            keyLight.shadow.camera.far = 28;
+            const d = 6.5;
+            keyLight.shadow.camera.left = -d;
+            keyLight.shadow.camera.right = d;
+            keyLight.shadow.camera.top = d;
+            keyLight.shadow.camera.bottom = -d;
+            keyLight.shadow.bias = -0.0005;
+            keyLight.shadow.radius = 3.5;
+            scene.add(keyLight);
+
+            // 2. Front-Left Studio Softbox Fill (highlights the 12 concentric cone ribs, central dome, and glossy horn)
+            const coneRakingLight = new THREE.DirectionalLight(0xffffff, 0.85);
+            coneRakingLight.position.set(-7.0, 5.5, 8.5);
+            scene.add(coneRakingLight);
+
+            // 3. Lower-Front Grazing Fill
+            const lowGrazingFill = new THREE.DirectionalLight(0xffffff, 0.38);
+            lowGrazingFill.position.set(1.5, -4.5, 9.5);
+            scene.add(lowGrazingFill);
+
+            // 4. Rear Rim / Backlight for the glossy horn ribs and compression driver
+            const rimLight = new THREE.DirectionalLight(0xffffff, 0.95);
+            rimLight.position.set(-4.5, 9.0, -10.0);
+            scene.add(rimLight);
+
+            // Seamless Studio Cyclorama Floor Plane
+            const floorGeo = new THREE.PlaneGeometry(80, 80);
+            const floorMat = new THREE.MeshStandardMaterial({
+                color: new THREE.Color('#d7d9de'),
+                roughness: 0.92,
+                metalness: 0.0
+            });
+            const floorMesh = new THREE.Mesh(floorGeo, floorMat);
+            floorMesh.rotation.x = -Math.PI / 2;
+            floorMesh.position.y = -4.30;
+            floorMesh.receiveShadow = true;
+            scene.add(floorMesh);
+
+            // Instantiate and add the single modular Main Audio Speaker
+            const speaker = createMainAudioSpeaker();
+            scene.add(speaker);
+
+            // Interactive OrbitControls
+            const controls = new OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.target.set(0, -0.15, 0);
+            controls.minDistance = 4.5;
+            controls.maxDistance = 26;
+            controls.maxPolarAngle = Math.PI / 2 + 0.08;
+            controls.update();
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+
+            renderer.setAnimationLoop(() => {
+                controls.update();
+                renderer.render(scene, camera);
+            });
+        }
+
+        window.addEventListener('DOMContentLoaded', initScene);
+    </script>
+</body>
+</html>
