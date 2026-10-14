@@ -1,0 +1,2685 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>3D Device Model - WebGPU HDRI</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    html, body {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: radial-gradient(circle at 50% 48%, #efefef 0%, #e5e5e5 62%, #d8d8d8 100%);
+    }
+    #viewport {
+      width: 100%;
+      height: 100%;
+      display: block;
+      outline: none;
+      cursor: grab;
+    }
+    #viewport:active {
+      cursor: grabbing;
+    }
+  </style>
+
+  <!-- Three.js WebGPU build + JSM addons via CDN importmap -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.webgpu.js",
+        "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.webgpu.js",
+        "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.tsl.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="viewport"></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+    import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+
+    /**
+     * ============================================================================
+     * 1. APP CONFIG & PHYSICAL SPECIFICATIONS (1 unit = 1 millimeter)
+     * ============================================================================
+     * Reference Scale: Standard 5.25" Internal Computer DVD-ROM Drive Bezel
+     * Standard Bezel Width = 148.0 mm, Standard Bezel Height = 42.0 mm.
+     * All proportions are strictly derived from the 4 orthographic reference views.
+     */
+    export const AppConfig = {
+      dimensions: {
+        // Standard 5.25" optical drive bezel reference
+        dvdBezelWidth: 148.0,
+        dvdBezelHeight: 42.0,
+        dvdBezelDepth: 3.2,
+
+        // Orange painted sheet-metal center chassis
+        chassisWidth: 150.0,     // 148mm bay + 1mm orange lip on left & right
+        chassisHeight: 87.0,     // 43mm upper orange front + 42mm DVD bay + 2mm lips/seams
+        chassisDepth: 182.0,     // Front-to-rear depth matching top & side views
+        chassisCornerRadius: 1.2,
+
+        // Solid natural oak wood side cheeks
+        woodThickness: 9.5,      // Each side cheek is 9.5mm wide (Total width = 169mm)
+        woodHeight: 87.0,
+        woodDepth: 182.0,
+        woodBevel: 0.9,
+
+        // Bottom rubber feet
+        footRadius: 9.5,
+        footHeight: 2.6,
+        footInsetX: 54.0,
+        footInsetZ: 64.0
+      },
+      colors: {
+        studioBg: 0xe6e6e6,
+        orangePaint: '#e34a00',
+        orangePaintHex: 0xe34a00,
+        dvdCream: 0xe8e4da,
+        dvdDarkSlot: 0x22211f,
+        matteBlack: 0x161719,
+        switchBlack: 0x151618,
+        silverCap: 0xdcdfe4,
+        darkCap: 0x3a3d42,
+        chrome: 0xf4f6f8,
+        rcaWhite: 0xf4f4f2,
+        rcaRed: 0xd61e1e
+      },
+      // Exact 1:1 coordinate table (in mm on the 150x182mm top panel) derived from the Top View reference
+      topLayout: {
+        lcd: { x: -21.08, z: -55.18, bezelW: 81.4, bezelD: 25.2, winW: 72.8, winD: 16.8 },
+        btnPrev: { x: 34.13, z: -54.48, bezelW: 14.2, bezelD: 14.2, capW: 11.0, capD: 11.0, iconZ: -42.93 },
+        btnNext: { x: 55.95, z: -54.48, bezelW: 14.2, bezelD: 14.2, capW: 11.0, capD: 11.0, iconZ: -42.93 },
+        btnPlay: { x: -54.23, z: 55.88, bezelW: 15.0, bezelD: 21.2, capW: 11.6, capD: 17.8, iconZ: 70.93 },
+        btnRew:  { x: -28.13, z: 59.38, bezelW: 14.2, bezelD: 14.2, capW: 11.0, capD: 11.0, iconZ: 70.93 },
+        btnFf:   { x: -8.02,  z: 59.38, bezelW: 14.2, bezelD: 14.2, capW: 11.0, capD: 11.0, iconZ: 70.93 },
+        btnEject:{ x: 53.28,  z: 58.38, bezelW: 19.2, bezelD: 16.2, capW: 15.6, capD: 12.6, iconZ: 70.93 },
+        pitch:   { x: 55.95,  topZ: -20.53, botZ: 38.73, centerZ: 9.10, halfTravel: 29.63, labelZ: 42.93 }
+      },
+      initialState: {
+        powerOn: true,
+        isPlaying: true,
+        track: 6,
+        elapsedSeconds: 84.86,   // 01:24:86 shown in reference photo
+        pitchNormalized: -0.21,  // Exact fader position shown in top & side reference photos
+        trayOpen: false
+      }
+    };
+
+    /**
+     * ============================================================================
+     * 2. BASE MODULAR ARCHITECTURE (Scalable 3D & Web Component Registry)
+     * ============================================================================
+     */
+    export class Component3D {
+      constructor(name, context) {
+        this.name = name;
+        this.context = context;
+        this.group = new THREE.Group();
+        this.group.name = name;
+        this.interactables = [];
+        this.subComponents = new Map();
+      }
+
+      init() {}
+
+      addSubComponent(component) {
+        component.init();
+        this.subComponents.set(component.name, component);
+        this.group.add(component.group);
+        this.interactables.push(...component.interactables);
+        return component;
+      }
+
+      registerInteractable(mesh, handlerConfig) {
+        mesh.userData.interactable = true;
+        mesh.userData.handler = handlerConfig;
+        this.interactables.push(mesh);
+      }
+
+      update(delta, elapsed) {
+        for (const sub of this.subComponents.values()) {
+          sub.update(delta, elapsed);
+        }
+      }
+    }
+
+    /**
+     * ============================================================================
+     * 3. STUDIO HDRI & PROCEDURAL TEXTURE GENERATOR
+     * ============================================================================
+     * Generates a real 32-bit Radiance (.hdr RGBE) studio environment parsed via
+     * RGBELoader, plus tangent-space normal maps, photographic oak wood textures,
+     * 1:1 top-panel stencil artwork, and VFD amber phosphor textures.
+     */
+    export class ProceduralTextures {
+      static hash2D(x, y) {
+        const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+        return n - Math.floor(n);
+      }
+
+      static smoothNoise(x, y) {
+        const ix = Math.floor(x);
+        const iy = Math.floor(y);
+        const fx = x - ix;
+        const fy = y - iy;
+        const ux = fx * fx * (3.0 - 2.0 * fx);
+        const uy = fy * fy * (3.0 - 2.0 * fy);
+
+        const a = this.hash2D(ix, iy);
+        const b = this.hash2D(ix + 1, iy);
+        const c = this.hash2D(ix, iy + 1);
+        const d = this.hash2D(ix + 1, iy + 1);
+
+        return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+      }
+
+      static fbm(x, y, octaves = 4) {
+        let value = 0.0;
+        let amp = 0.5;
+        let freq = 1.0;
+        for (let i = 0; i < octaves; i++) {
+          value += amp * this.smoothNoise(x * freq, y * freq);
+          freq *= 2.02;
+          amp *= 0.5;
+        }
+        return value;
+      }
+
+      /**
+       * Converts a grayscale heightfield array (0..1) into a WebGPU-native
+       * tangent-space normal map CanvasTexture.
+       */
+      static heightArrayToNormalTexture(heights, width, height, strength = 3.0) {
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        const imgData = ctx.createImageData(width, height);
+        const data = imgData.data;
+
+        for (let y = 0; y < height; y++) {
+          const yUp = (y - 1 + height) % height;
+          const yDown = (y + 1) % height;
+          for (let x = 0; x < width; x++) {
+            const xLeft = (x - 1 + width) % width;
+            const xRight = (x + 1) % width;
+
+            const dX = (heights[y * width + xRight] - heights[y * width + xLeft]) * strength;
+            const dY = (heights[yDown * width + x] - heights[yUp * width + x]) * strength;
+            const dZ = 1.0;
+            const invLen = 1.0 / Math.sqrt(dX * dX + dY * dY + dZ * dZ);
+
+            const idx = (y * width + x) * 4;
+            data[idx] = Math.round(((dX * invLen) * 0.5 + 0.5) * 255);
+            data[idx + 1] = Math.round(((dY * invLen) * 0.5 + 0.5) * 255);
+            data[idx + 2] = Math.round(((dZ * invLen) * 0.5 + 0.5) * 255);
+            data[idx + 3] = 255;
+          }
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+        const normalTex = new THREE.CanvasTexture(canvas);
+        normalTex.colorSpace = THREE.NoColorSpace;
+        normalTex.anisotropy = 8;
+        normalTex.needsUpdate = true;
+        return normalTex;
+      }
+
+      /**
+       * Generates an authentic Radiance (.hdr RGBE) binary file in memory with true
+       * High Dynamic Range studio softboxes (up to 45.0 linear radiance) and deep
+       * negative fill (~0.01) for dramatic photographic contrast, parsed via RGBELoader.
+       */
+      static createStudioRadianceHDRI(width = 1024, height = 512) {
+        const headerStr = `#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y ${height} +X ${width}\n`;
+        const encoder = new TextEncoder();
+        const headerBytes = encoder.encode(headerStr);
+        const pixelBytes = new Uint8Array(width * height * 4);
+
+        const floatToRGBE = (r, g, b, outBuf, offset) => {
+          const maxComp = Math.max(r, g, b);
+          if (maxComp <= 1e-32) {
+            outBuf[offset] = 0;
+            outBuf[offset + 1] = 0;
+            outBuf[offset + 2] = 0;
+            outBuf[offset + 3] = 0;
+            return;
+          }
+          const exp = Math.ceil(Math.log2(maxComp));
+          const scale = Math.pow(2.0, -exp) * 256.0;
+          let R = Math.min(255, Math.max(0, Math.floor(r * scale)));
+          let G = Math.min(255, Math.max(0, Math.floor(g * scale)));
+          let B = Math.min(255, Math.max(0, Math.floor(b * scale)));
+          // Ensure first pixel doesn't accidentally trigger RLE magic header [2, 2]
+          if (offset === 0 && R === 2 && G === 2) {
+            R = 3;
+          }
+          outBuf[offset] = R;
+          outBuf[offset + 1] = G;
+          outBuf[offset + 2] = B;
+          outBuf[offset + 3] = Math.min(255, Math.max(0, exp + 128));
+        };
+
+        // Crisp rectangular studio softbox with internal baffle diffusion & sharp barn-door cutoff
+        const softboxContribution = (u, v, cu, cv, wu, wv, intensity, rTint, gTint, bTint) => {
+          let du = Math.abs(u - cu);
+          if (du > 0.5) du = 1.0 - du;
+          const dv = Math.abs(v - cv);
+          const nx = du / wu;
+          const ny = dv / wv;
+          // Sharp super-ellipse studio softbox boundary (p = 6.0)
+          const dist = Math.pow(Math.pow(nx, 6.0) + Math.pow(ny, 6.0), 1.0 / 6.0);
+          if (dist >= 1.35) return [0, 0, 0];
+          // Hot center baffle with crisp edge falloff
+          const core = dist < 0.85 ? 1.0 : Math.exp(-Math.pow((dist - 0.85) * 4.2, 2.4));
+          const edgeHotspot = 1.0 + 0.15 * Math.sin(Math.min(1.0, dist) * Math.PI);
+          const val = intensity * core * edgeHotspot;
+          return [val * rTint, val * gTint, val * bTint];
+        };
+
+        for (let y = 0; y < height; y++) {
+          const v = y / height; // 0 = North Pole (+Y zenith), 0.5 = Equator, 1.0 = South Pole (-Y floor)
+          for (let x = 0; x < width; x++) {
+            const u = x / width;
+
+            // Deep studio negative fill (black velvet flags around the subject for strong 3D contrast)
+            let r = 0.012;
+            let g = 0.012;
+            let b = 0.014;
+
+            if (v > 0.54) {
+              // Controlled studio table bounce with dark negative-fill skirt near horizon
+              const floorT = Math.min(1.0, (v - 0.54) / 0.46);
+              const bounce = 0.02 + 0.18 * Math.pow(Math.sin(floorT * Math.PI * 0.85), 2.2);
+              r = bounce * 1.02;
+              g = bounce * 1.00;
+              b = bounce * 0.98;
+            } else {
+              // Dark studio ceiling with subtle horizon falloff
+              const skyT = Math.pow(v / 0.54, 2.5);
+              r = 0.008 + 0.024 * skyT;
+              g = 0.008 + 0.024 * skyT;
+              b = 0.010 + 0.028 * skyT;
+            }
+
+            // 1. Primary Key Light Softbox (Front-Right Overhead: 42.0 HDR radiance for crisp orange-peel speculars)
+            const sbKey = softboxContribution(u, v, 0.345, 0.215, 0.072, 0.068, 42.0, 1.0, 0.98, 0.94);
+            // 2. High-Contrast Top Strip Bank (Narrow overhead strip: 24.0 HDR radiance)
+            const sbTopStrip = softboxContribution(u, v, 0.27, 0.095, 0.135, 0.028, 24.0, 1.0, 0.99, 0.97);
+            // 3. Rear-Right Rim / Backlight Softbox (32.0 HDR radiance for dramatic edge separation & rear reflection)
+            const sbRim = softboxContribution(u, v, 0.825, 0.265, 0.075, 0.070, 32.0, 1.0, 0.97, 0.93);
+            // 4. Left Fill Strip Diffuser (18.0 HDR radiance, narrow strip to define left wood cheek & bezel bevels)
+            const sbLeftStrip = softboxContribution(u, v, 0.115, 0.345, 0.038, 0.095, 18.0, 0.95, 0.98, 1.0);
+            // 5. Right Lateral Accent Softbox (19.5 HDR radiance for rich oak wood grain depth)
+            const sbRightSide = softboxContribution(u, v, 0.535, 0.325, 0.055, 0.085, 19.5, 1.0, 0.96, 0.90);
+
+            r += sbKey[0] + sbTopStrip[0] + sbRim[0] + sbLeftStrip[0] + sbRightSide[0];
+            g += sbKey[1] + sbTopStrip[1] + sbRim[1] + sbLeftStrip[1] + sbRightSide[1];
+            b += sbKey[2] + sbTopStrip[2] + sbRim[2] + sbLeftStrip[2] + sbRightSide[2];
+
+            const idx = (y * width + x) * 4;
+            floatToRGBE(r, g, b, pixelBytes, idx);
+          }
+        }
+
+        const fullBuffer = new Uint8Array(headerBytes.length + pixelBytes.length);
+        fullBuffer.set(headerBytes, 0);
+        fullBuffer.set(pixelBytes, headerBytes.length);
+
+        try {
+          const loader = new RGBELoader();
+          const parsed = loader.parse(fullBuffer.buffer);
+          const hdrTex = new THREE.DataTexture(
+            parsed.data,
+            parsed.width,
+            parsed.height,
+            THREE.RGBAFormat,
+            parsed.type
+          );
+          hdrTex.mapping = THREE.EquirectangularReflectionMapping;
+          hdrTex.minFilter = THREE.LinearFilter;
+          hdrTex.magFilter = THREE.LinearFilter;
+          hdrTex.generateMipmaps = false;
+          hdrTex.needsUpdate = true;
+          return hdrTex;
+        } catch (err) {
+          return this.createFallbackStudioEnvMap();
+        }
+      }
+
+      static createFallbackStudioEnvMap() {
+        const w = 512;
+        const h = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+
+        const bg = ctx.createLinearGradient(0, 0, 0, h);
+        bg.addColorStop(0.0, '#222226');
+        bg.addColorStop(0.5, '#343438');
+        bg.addColorStop(1.0, '#bcbcbc');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, w, h);
+
+        const drawBox = (cx, cy, rw, rh, alpha) => {
+          const g = ctx.createRadialGradient(cx, cy, rw * 0.1, cx, cy, rw);
+          g.addColorStop(0.0, `rgba(255, 253, 248, ${alpha})`);
+          g.addColorStop(1.0, 'rgba(255, 253, 248, 0.0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(cx - rw, cy - rh, rw * 2, rh * 2);
+        };
+        drawBox(w * 0.34, h * 0.22, 95, 50, 1.0);
+        drawBox(w * 0.82, h * 0.26, 85, 45, 0.95);
+        drawBox(w * 0.14, h * 0.34, 70, 45, 0.75);
+
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.mapping = THREE.EquirectangularReflectionMapping;
+        tex.colorSpace = THREE.SRGBColorSpace;
+        tex.needsUpdate = true;
+        return tex;
+      }
+
+      /**
+       * Creates the signature glossy "orange peel" (piel de naranja) powder-coat normal map
+       * with a sleek metallic-enamel micro-finish
+       */
+      static createOrangePeelNormalMap(size = 1024) {
+        const heights = new Float32Array(size * size);
+        const scale = 34.0;
+
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const nx = (x / size) * scale;
+            const ny = (y / size) * scale;
+            const n1 = this.fbm(nx, ny, 3);
+            const n2 = this.smoothNoise(nx * 2.2, ny * 2.2) * 0.22;
+            heights[y * size + x] = n1 + n2;
+          }
+        }
+
+        const normalTex = this.heightArrayToNormalTexture(heights, size, size, 1.45);
+        normalTex.wrapS = THREE.RepeatWrapping;
+        normalTex.wrapT = THREE.RepeatWrapping;
+        normalTex.repeat.set(3.2, 3.2);
+        return normalTex;
+      }
+
+      /**
+       * Creates ultra-detailed photographic natural oak/ash wood textures (2048x1024)
+       * matching the Side View reference photo (cathedral arch figure, open latewood pores,
+       * fine vessel dashes, medullary rays, tangent-space normal map, and roughness map).
+       */
+      static createWoodTextures(horizontal = true) {
+        const width = horizontal ? 2048 : 512;
+        const height = horizontal ? 1024 : 1024;
+
+        const colorCanvas = document.createElement('canvas');
+        colorCanvas.width = width;
+        colorCanvas.height = height;
+        const ctx = colorCanvas.getContext('2d');
+
+        const roughCanvas = document.createElement('canvas');
+        roughCanvas.width = width;
+        roughCanvas.height = height;
+        const rCtx = roughCanvas.getContext('2d');
+
+        const imgData = ctx.createImageData(width, height);
+        const rImgData = rCtx.createImageData(width, height);
+        const data = imgData.data;
+        const rData = rImgData.data;
+        const heights = new Float32Array(width * height);
+
+        for (let y = 0; y < height; y++) {
+          for (let x = 0; x < width; x++) {
+            const u = horizontal ? x / width : y / height;
+            const v = horizontal ? y / height : x / width;
+
+            // 1. Macro cathedral arch figure matching the 4th reference photo (Side View)
+            const archCenter = 0.43 + 0.07 * Math.sin(u * Math.PI * 1.65 - 0.4);
+            const dy = v - archCenter;
+            const parabola = Math.sqrt(dy * dy + 0.008) * (1.45 - 0.52 * u);
+
+            // Multi-scale organic domain warping
+            const warpLow = this.fbm(u * 2.6 + 1.3, v * 5.2 + 2.1, 4) * 0.28;
+            const warpMid = this.fbm(u * 7.5 + 4.7, v * 16.0 + 0.8, 3) * 0.08;
+
+            // Growth ring coordinate
+            const ringCoord = parabola * 29.0 + warpLow * 7.5 + warpMid * 3.0;
+            const ringWave = 0.5 + 0.5 * Math.sin(ringCoord * Math.PI * 2.0);
+            const latewoodBand = Math.pow(ringWave, 2.85);
+
+            // 2. High-frequency open oak pores / vessel channels running parallel to grain
+            const poreNoise1 = this.smoothNoise(u * 135.0 + warpLow * 4.0, v * 480.0 + ringCoord * 0.6);
+            const poreNoise2 = this.smoothNoise(u * 260.0 + 13.0, v * 820.0);
+            const poreMask = 0.35 + 0.65 * latewoodBand;
+            const openPore = poreNoise1 < (0.22 * poreMask)
+              ? Math.min(1.0, ((0.22 * poreMask) - poreNoise1) * 6.5)
+              : 0.0;
+            const microFiber = (poreNoise2 - 0.5) * 0.14;
+
+            // 3. Subtle cross-grain medullary rays (silky flecks typical of oak)
+            const rayNoise = this.smoothNoise(u * 42.0, v * 14.0 + warpLow * 2.0);
+            const medullaryRay = rayNoise > 0.78 ? (rayNoise - 0.78) * 1.4 : 0.0;
+
+            // 4. Photographic tonal features from the reference side view:
+            const dxStreak = (u - 0.33) / 0.065;
+            const dyStreak = (v - 0.655) / 0.007;
+            const mineralStreak = Math.exp(-(dxStreak * dxStreak + dyStreak * dyStreak)) * 0.65;
+            const rightWarmth = Math.exp(-(((u - 0.84) / 0.22) ** 2 + ((v - 0.56) / 0.26) ** 2)) * 0.22;
+
+            const grainDensity = Math.min(
+              1.0,
+              Math.max(
+                0.0,
+                latewoodBand * 0.58 +
+                openPore * 0.48 +
+                mineralStreak +
+                rightWarmth +
+                microFiber -
+                medullaryRay * 0.22
+              )
+            );
+
+            // Color ramp sampled directly from the Side View reference photo
+            let r, g, b;
+            if (grainDensity < 0.5) {
+              const t = grainDensity * 2.0;
+              r = 236 - t * 29;
+              g = 176 - t * 48;
+              b = 113 - t * 54;
+            } else {
+              const t = (grainDensity - 0.5) * 2.0;
+              r = 207 - t * 72;
+              g = 128 - t * 66;
+              b = 59 - t * 42;
+            }
+
+            const idx = (y * width + x) * 4;
+            data[idx] = Math.max(0, Math.min(255, Math.round(r)));
+            data[idx + 1] = Math.max(0, Math.min(255, Math.round(g)));
+            data[idx + 2] = Math.max(0, Math.min(255, Math.round(b)));
+            data[idx + 3] = 255;
+
+            // Heightfield for tangent-space normal map generation
+            heights[y * width + x] = Math.max(
+              0.0,
+              Math.min(1.0, 0.88 - latewoodBand * 0.28 - openPore * 0.54 - mineralStreak * 0.32 + microFiber * 0.14)
+            );
+
+            // Roughness map (open pores are rougher, satin-finished earlywood is smoother)
+            const roughVal = Math.max(0, Math.min(255, Math.round(96 + latewoodBand * 48 + openPore * 86)));
+            rData[idx] = roughVal;
+            rData[idx + 1] = roughVal;
+            rData[idx + 2] = roughVal;
+            rData[idx + 3] = 255;
+          }
+        }
+
+        ctx.putImageData(imgData, 0, 0);
+        rCtx.putImageData(rImgData, 0, 0);
+
+        const colorTex = new THREE.CanvasTexture(colorCanvas);
+        colorTex.colorSpace = THREE.SRGBColorSpace;
+        colorTex.anisotropy = 8;
+        colorTex.needsUpdate = true;
+
+        const normalTex = this.heightArrayToNormalTexture(heights, width, height, 2.6);
+
+        const roughTex = new THREE.CanvasTexture(roughCanvas);
+        roughTex.colorSpace = THREE.NoColorSpace;
+        roughTex.anisotropy = 8;
+        roughTex.needsUpdate = true;
+
+        return { colorTex, normalTex, roughTex };
+      }
+
+      /**
+       * Creates the 2048x2048 Top Panel Texture by mapping the exact pixel coordinates
+       * from the Top View reference photo (`WhatsApp Image 2026-09-30 at 1.30.37 PM (1).jpg`)
+       * directly onto the orange top face texture, and using the exact 3D millimeter
+       * coordinates from `AppConfig.topLayout` for all silkscreen icons so they align 1:1
+       * with the 3D buttons and pitch fader.
+       */
+      static createTopPanelTexture() {
+        const size = 2048;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+
+        // Fill base deep saturated orange enamel (#e34a00)
+        ctx.fillStyle = AppConfig.colors.orangePaint;
+        ctx.fillRect(0, 0, size, size);
+
+        // Subtle bent sheet-metal edge highlight & shadow along the left/right flange seams (as seen in Top View)
+        const leftSeamGrad = ctx.createLinearGradient(0, 0, size * 0.045, 0);
+        leftSeamGrad.addColorStop(0.0, 'rgba(90, 22, 0, 0.32)');
+        leftSeamGrad.addColorStop(0.38, 'rgba(255, 195, 140, 0.42)');
+        leftSeamGrad.addColorStop(0.72, 'rgba(140, 35, 0, 0.14)');
+        leftSeamGrad.addColorStop(1.0, 'rgba(227, 74, 0, 0.0)');
+        ctx.fillStyle = leftSeamGrad;
+        ctx.fillRect(0, 0, size * 0.045, size);
+
+        const rightSeamGrad = ctx.createLinearGradient(size * 0.965, 0, size, 0);
+        rightSeamGrad.addColorStop(0.0, 'rgba(227, 74, 0, 0.0)');
+        rightSeamGrad.addColorStop(0.45, 'rgba(255, 190, 130, 0.28)');
+        rightSeamGrad.addColorStop(1.0, 'rgba(85, 20, 0, 0.35)');
+        ctx.fillStyle = rightSeamGrad;
+        ctx.fillRect(size * 0.965, 0, size * 0.035, size);
+
+        // Coordinate converters:
+        // 1) Reference photo pixel (1024x1024 where orange panel is px=[156..857], py=[126..906]) -> Texture (2048x2048)
+        const pxToX = (px) => ((px - 156.0) / 701.0) * size;
+        const pyToY = (py) => ((py - 126.0) / 780.0) * size;
+        const sX = size / 701.0;
+        const sY = size / 780.0;
+
+        // 2) Exact 3D millimeter coordinates (x in [-75..+75], z in [-91..+91]) -> Texture (2048x2048)
+        const mmToX = (mmX) => ((mmX + 75.0) / 150.0) * size;
+        const mmToY = (mmZ) => ((mmZ + 91.0) / 182.0) * size;
+        const mmScaleX = size / 150.0;
+        const mmScaleY = size / 182.0;
+
+        // Offscreen ink layer for the black stencil graphic
+        const inkCanvas = document.createElement('canvas');
+        inkCanvas.width = size;
+        inkCanvas.height = size;
+        const ictx = inkCanvas.getContext('2d');
+        ictx.strokeStyle = '#181310';
+        ictx.fillStyle = '#181310';
+        ictx.lineCap = 'round';
+        ictx.lineJoin = 'round';
+
+        const drawPhotoPath = (pts, strokeWidthPx = 6.5, closed = false, fill = false) => {
+          if (!pts || pts.length < 2) return;
+          ictx.beginPath();
+          ictx.lineWidth = strokeWidthPx * sX;
+          ictx.moveTo(pxToX(pts[0][0]), pyToY(pts[0][1]));
+          for (let i = 1; i < pts.length; i++) {
+            const p = pts[i];
+            if (p.length === 4) {
+              ictx.quadraticCurveTo(pxToX(p[0]), pyToY(p[1]), pxToX(p[2]), pyToY(p[3]));
+            } else if (p.length === 6) {
+              ictx.bezierCurveTo(pxToX(p[0]), pyToY(p[1]), pxToX(p[2]), pyToY(p[3]), pxToX(p[4]), pyToY(p[5]));
+            } else {
+              ictx.lineTo(pxToX(p[0]), pyToY(p[1]));
+            }
+          }
+          if (closed) ictx.closePath();
+          if (fill) ictx.fill();
+          if (strokeWidthPx > 0) ictx.stroke();
+        };
+
+        // 1A. Headphone Upper Band & Left Cushion Wedge
+        drawPhotoPath([
+          [293, 399],
+          [314, 372, 336, 349],
+          [343, 362, 335, 386],
+          [318, 405, 297, 412]
+        ], 4.0, true, true);
+
+        // Top Cranium Arch & 3 Spiky Hair Tufts
+        drawPhotoPath([
+          [333, 353],
+          [364, 329, 398, 336],
+          [409, 341, 415, 350],
+          [428, 326, 441, 305],
+          [439, 332, 436, 354],
+          [452, 352, 464, 348],
+          [458, 361, 454, 370],
+          [476, 370, 494, 369],
+          [476, 381, 462, 389]
+        ], 6.8, false, false);
+
+        // Inner Hair Bangs & Forehead Crease
+        drawPhotoPath([
+          [415, 350],
+          [420, 364, 434, 355]
+        ], 6.0);
+        drawPhotoPath([
+          [395, 360],
+          [412, 378, 424, 382],
+          [438, 372, 454, 370]
+        ], 6.2);
+        drawPhotoPath([
+          [358, 394],
+          [392, 416, 432, 431],
+          [416, 415, 404, 405],
+          [428, 400, 462, 406]
+        ], 6.2);
+
+        // Left Headphone Earcup Oval
+        drawPhotoPath([
+          [322, 409],
+          [301, 416, 303, 452],
+          [305, 488, 330, 492],
+          [354, 488, 354, 452],
+          [353, 414, 336, 408]
+        ], 6.8, true, false);
+
+        // Hoodie Bump Behind Left Earcup
+        drawPhotoPath([
+          [301, 416],
+          [272, 414, 263, 436],
+          [268, 454, 302, 465]
+        ], 6.4);
+
+        // Right Headphone Earcup Oval
+        drawPhotoPath([
+          [464, 388],
+          [492, 398, 491, 426],
+          [490, 449, 466, 454],
+          [446, 434, 448, 412],
+          [452, 396, 464, 388]
+        ], 6.8, true, false);
+
+        // Face Expression: Furrowed Squinting Eyes & Smirk
+        drawPhotoPath([
+          [368, 441],
+          [388, 456, 405, 458],
+          [422, 457, 435, 453],
+          [418, 465, 398, 463],
+          [382, 466, 371, 471],
+          [384, 457, 368, 441]
+        ], 5.5, true, true);
+
+        drawPhotoPath([
+          [424, 441],
+          [434, 450, 445, 453]
+        ], 6.2);
+
+        drawPhotoPath([
+          [392, 481],
+          [410, 483, 426, 479]
+        ], 6.0);
+
+        // Jawline & Chin
+        drawPhotoPath([
+          [326, 492],
+          [348, 504, 388, 504],
+          [425, 504, 438, 495],
+          [452, 476, 466, 454]
+        ], 6.6);
+
+        // Neck / Collar / V-Chest Lines
+        drawPhotoPath([
+          [322, 492],
+          [317, 514, 322, 534],
+          [336, 522, 342, 506]
+        ], 6.5);
+        drawPhotoPath([
+          [424, 502],
+          [432, 518, 428, 535],
+          [444, 518, 458, 504]
+        ], 6.4);
+        drawPhotoPath([
+          [463, 506],
+          [442, 532, 422, 558]
+        ], 6.8);
+
+        // Back / Left Hoodie Shoulder & Graffiti Fragments
+        drawPhotoPath([
+          [265, 439],
+          [246, 446, 249, 482],
+          [252, 516, 268, 548]
+        ], 6.4);
+        drawPhotoPath([
+          [235, 526],
+          [251, 538],
+          [243, 564],
+          [228, 548]
+        ], 5.8, true, false);
+        drawPhotoPath([
+          [214, 548],
+          [234, 558],
+          [236, 581],
+          [217, 563]
+        ], 5.8, true, false);
+        drawPhotoPath([
+          [228, 586],
+          [236, 588, 233, 594]
+        ], 6.5, true, true);
+
+        // Right Shoulder & Sleeve
+        drawPhotoPath([
+          [444, 480],
+          [502, 502, 554, 519],
+          [564, 528, 552, 544],
+          [538, 558, 527, 570]
+        ], 6.8);
+
+        // Upper Arm Reaching Right Toward the Turntable Platter
+        drawPhotoPath([
+          [298, 532],
+          [322, 533, 344, 536],
+          [418, 562, 496, 574],
+          [546, 582, 576, 585],
+          [604, 579, 626, 573],
+          [629, 583, 608, 596],
+          [595, 602, 584, 604]
+        ], 6.8);
+
+        // Scratching Hand & Fingers Over Right Platter
+        drawPhotoPath([
+          [595, 602],
+          [626, 614, 651, 625],
+          [650, 638, 644, 646],
+          [602, 628, 556, 608]
+        ], 6.6);
+        drawPhotoPath([
+          [644, 646],
+          [640, 658, 634, 668],
+          [595, 648, 554, 626]
+        ], 6.4);
+        drawPhotoPath([
+          [626, 665],
+          [616, 678, 604, 687],
+          [590, 686, 568, 670],
+          [532, 644, 502, 622]
+        ], 6.4);
+        drawPhotoPath([
+          [524, 632],
+          [552, 633, 578, 630]
+        ], 6.0);
+
+        // Lower Contour of Upper Right-Reaching Arm
+        drawPhotoPath([
+          [502, 622],
+          [482, 608, 468, 595],
+          [416, 600, 358, 596],
+          [304, 590, 282, 572],
+          [270, 558, 266, 544]
+        ], 6.8);
+
+        // Second Arm Reaching Down-Left Toward the Play Button
+        drawPhotoPath([
+          [306, 589],
+          [304, 616, 301, 644]
+        ], 6.4);
+        drawPhotoPath([
+          [466, 596],
+          [480, 614, 484, 628],
+          [470, 638, 458, 646],
+          [478, 654, 496, 662],
+          [446, 678, 388, 688],
+          [352, 686, 326, 678]
+        ], 6.6);
+
+        // Forearm Sweeping Down-Left
+        drawPhotoPath([
+          [426, 608],
+          [358, 632, 278, 656],
+          [214, 678, 160, 692]
+        ], 6.6);
+        drawPhotoPath([
+          [462, 608],
+          [398, 642, 332, 672],
+          [282, 686, 264, 692],
+          [252, 718, 234, 754]
+        ], 6.6);
+
+        // Left Hand & Fingers Framing the Bottom-Left Play/Pause Button
+        drawPhotoPath([
+          [160, 692],
+          [161, 725, 162, 758]
+        ], 6.2);
+        drawPhotoPath([
+          [168, 822],
+          [170, 782, 182, 752],
+          [194, 728, 204, 706],
+          [200, 748, 195, 784],
+          [182, 806, 172, 822],
+          [192, 824, 210, 820],
+          [211, 788, 212, 756]
+        ], 6.4);
+
+        // 1B. Three 4-Pointed Stars & Ink Dot
+        drawPhotoPath([
+          [684, 325],
+          [658, 362, 642, 392],
+          [656, 400, 670, 408],
+          [650, 416, 636, 424],
+          [631, 440, 626, 456],
+          [618, 438, 612, 424],
+          [594, 435, 576, 446],
+          [594, 420, 608, 398],
+          [601, 372, 595, 346],
+          [610, 364, 624, 378],
+          [654, 352, 684, 325]
+        ], 6.4, true, false);
+
+        drawPhotoPath([
+          [712, 415],
+          [718, 432, 738, 446],
+          [720, 456, 706, 474],
+          [694, 464, 675, 468],
+          [684, 450, 676, 428],
+          [696, 434, 712, 415]
+        ], 6.0, true, false);
+
+        drawPhotoPath([
+          [652, 470],
+          [650, 486, 660, 494],
+          [648, 498, 642, 512],
+          [638, 498, 632, 492],
+          [642, 484, 652, 470]
+        ], 5.5, true, false);
+
+        drawPhotoPath([
+          [666, 532],
+          [674, 532, 673, 539],
+          [665, 539, 666, 532]
+        ], 5.0, true, true);
+
+        // 1C. Right Turntable Platter, Spindle & Large Curved Arrow
+        drawPhotoPath([
+          [624, 608],
+          [728, 576, 856, 562]
+        ], 6.4);
+
+        drawPhotoPath([
+          [648, 625],
+          [738, 592, 804, 608],
+          [836, 624, 824, 668],
+          [802, 718, 704, 756],
+          [608, 788, 554, 764],
+          [518, 738, 544, 684],
+          [562, 662, 584, 650]
+        ], 6.2);
+
+        ictx.save();
+        ictx.translate(pxToX(685), pyToY(676));
+        ictx.rotate(-0.36);
+        ictx.beginPath();
+        ictx.ellipse(0, 0, 17 * sX, 6.5 * sY, 0, 0, Math.PI * 2);
+        ictx.fill();
+        ictx.restore();
+
+        ictx.beginPath();
+        ictx.ellipse(pxToX(589), pyToY(790), 10 * sX, 5.5 * sY, -0.25, 0, Math.PI * 2);
+        ictx.fill();
+        ictx.beginPath();
+        ictx.arc(pxToX(583), pyToY(806), 3.8 * sX, 0, Math.PI * 2);
+        ictx.fill();
+
+        drawPhotoPath([
+          [855, 704],
+          [774, 772, 672, 814],
+          [682, 794, 690, 778],
+          [645, 816, 600, 852],
+          [658, 858, 718, 864],
+          [704, 854, 692, 845],
+          [702, 840, 710, 836]
+        ], 6.6);
+        drawPhotoPath([
+          [798, 808],
+          [828, 792, 856, 774]
+        ], 6.2);
+
+        // 1D. Left Turntable Platter & Curved Arrows Framing Bottom Buttons
+        drawPhotoPath([
+          [248, 732],
+          [326, 738, 382, 768]
+        ], 6.8);
+        drawPhotoPath([
+          [322, 712],
+          [378, 720, 428, 720],
+          [414, 726, 404, 732],
+          [426, 750, 438, 768],
+          [432, 776, 426, 782]
+        ], 6.6);
+        drawPhotoPath([
+          [158, 892],
+          [265, 892, 356, 848]
+        ], 6.4);
+        drawPhotoPath([
+          [365, 904],
+          [412, 876, 428, 848]
+        ], 6.4);
+        drawPhotoPath([
+          [435, 904],
+          [476, 870, 488, 848]
+        ], 6.4);
+
+        // Authentic screen-print stencil micro-roughening on artwork edges
+        const inkImg = ictx.getImageData(0, 0, size, size);
+        const iData = inkImg.data;
+        for (let y = 0; y < size; y++) {
+          for (let x = 0; x < size; x++) {
+            const idx = (y * size + x) * 4;
+            const alpha = iData[idx + 3];
+            if (alpha > 15 && alpha < 245) {
+              const n = this.hash2D(x * 0.42, y * 0.42);
+              iData[idx + 3] = n > 0.38 ? 255 : 0;
+            }
+          }
+        }
+        ictx.putImageData(inkImg, 0, 0);
+
+        // 2. Crisp Technical Silkscreen (Positioned directly from `AppConfig.topLayout` 3D coordinates)
+        const layout = AppConfig.topLayout;
+        ictx.fillStyle = '#151210';
+        ictx.strokeStyle = '#151210';
+
+        // Pitch Scale & 'pitch' label aligned with `layout.pitch`
+        const pitchX = mmToX(layout.pitch.x);
+        const pitchTopY = mmToY(layout.pitch.topZ);
+        const pitchBotY = mmToY(layout.pitch.botZ);
+
+        ictx.lineWidth = 1.15 * mmScaleX;
+        ictx.beginPath();
+        ictx.moveTo(pitchX, pitchTopY);
+        ictx.lineTo(pitchX, pitchBotY);
+        ictx.stroke();
+
+        for (let i = 0; i <= 10; i++) {
+          const t = i / 10;
+          const ty = pitchTopY + t * (pitchBotY - pitchTopY);
+          const isMajor = (i === 0 || i === 5 || i === 10);
+          const halfW = (isMajor ? 7.0 : 4.8) * mmScaleX;
+          ictx.lineWidth = (isMajor ? 1.15 : 0.92) * mmScaleY;
+          ictx.beginPath();
+          ictx.moveTo(pitchX - halfW, ty);
+          ictx.lineTo(pitchX + halfW, ty);
+          ictx.stroke();
+        }
+
+        ictx.font = `600 ${Math.round(4.6 * mmScaleX)}px "Inter", "Helvetica Neue", Arial, sans-serif`;
+        ictx.textAlign = 'center';
+        ictx.textBaseline = 'middle';
+        ictx.fillText('pitch', pitchX, mmToY(layout.pitch.labelZ));
+
+        // Track Skip Icons (`|◀` and `▶|`) aligned with `btnPrev` & `btnNext`
+        const drawSkipIconMm = (mmX, mmZ, dir) => {
+          const cx = mmToX(mmX);
+          const cy = mmToY(mmZ);
+          const h = 3.3 * mmScaleY;
+          const w = 3.1 * mmScaleX;
+          const barW = 0.82 * mmScaleX;
+          ictx.beginPath();
+          if (dir < 0) {
+            ictx.fillRect(cx - w * 0.58, cy - h * 0.5, barW, h);
+            ictx.moveTo(cx - w * 0.16, cy);
+            ictx.lineTo(cx + w * 0.58, cy - h * 0.5);
+            ictx.lineTo(cx + w * 0.58, cy + h * 0.5);
+          } else {
+            ictx.moveTo(cx + w * 0.16, cy);
+            ictx.lineTo(cx - w * 0.58, cy - h * 0.5);
+            ictx.lineTo(cx - w * 0.58, cy + h * 0.5);
+            ictx.fillRect(cx + w * 0.58 - barW, cy - h * 0.5, barW, h);
+          }
+          ictx.closePath();
+          ictx.fill();
+        };
+        drawSkipIconMm(layout.btnPrev.x, layout.btnPrev.iconZ, -1);
+        drawSkipIconMm(layout.btnNext.x, layout.btnNext.iconZ, 1);
+
+        // Play/Pause Icon (`▶||`) aligned with `btnPlay`
+        {
+          const cx = mmToX(layout.btnPlay.x);
+          const cy = mmToY(layout.btnPlay.iconZ);
+          const h = 3.4 * mmScaleY;
+          const w = 4.2 * mmScaleX;
+          const barW = 0.82 * mmScaleX;
+          ictx.beginPath();
+          ictx.moveTo(cx - w * 0.52, cy - h * 0.5);
+          ictx.lineTo(cx + w * 0.02, cy);
+          ictx.lineTo(cx - w * 0.52, cy + h * 0.5);
+          ictx.closePath();
+          ictx.fill();
+          ictx.fillRect(cx + w * 0.14, cy - h * 0.5, barW, h);
+          ictx.fillRect(cx + w * 0.42, cy - h * 0.5, barW, h);
+        }
+
+        // Rewind (`◀◀`) & Fast-Forward (`▶▶`) aligned with `btnRew` & `btnFf`
+        const drawDoubleTriangleMm = (mmX, mmZ, dir) => {
+          const cx = mmToX(mmX);
+          const cy = mmToY(mmZ);
+          const h = 3.1 * mmScaleY;
+          const tw = 2.05 * mmScaleX;
+          for (let k = -1; k <= 1; k += 2) {
+            const ox = cx + k * tw * 0.50;
+            ictx.beginPath();
+            if (dir < 0) {
+              ictx.moveTo(ox - tw * 0.5, cy);
+              ictx.lineTo(ox + tw * 0.5, cy - h * 0.5);
+              ictx.lineTo(ox + tw * 0.5, cy + h * 0.5);
+            } else {
+              ictx.moveTo(ox + tw * 0.5, cy);
+              ictx.lineTo(ox - tw * 0.5, cy - h * 0.5);
+              ictx.lineTo(ox - tw * 0.5, cy + h * 0.5);
+            }
+            ictx.closePath();
+            ictx.fill();
+          }
+        };
+        drawDoubleTriangleMm(layout.btnRew.x, layout.btnRew.iconZ, -1);
+        drawDoubleTriangleMm(layout.btnFf.x, layout.btnFf.iconZ, 1);
+
+        // Eject Icon (`⏏`) aligned with `btnEject`
+        {
+          const cx = mmToX(layout.btnEject.x);
+          const cy = mmToY(layout.btnEject.iconZ);
+          const w = 3.8 * mmScaleX;
+          const h = 3.3 * mmScaleY;
+          ictx.beginPath();
+          ictx.moveTo(cx, cy - h * 0.55);
+          ictx.lineTo(cx - w * 0.5, cy + h * 0.05);
+          ictx.lineTo(cx + w * 0.5, cy + h * 0.05);
+          ictx.closePath();
+          ictx.fill();
+          ictx.fillRect(cx - w * 0.5, cy + h * 0.24, w, 0.88 * mmScaleY);
+        }
+
+        // Composite stencil & silkscreen ink directly onto the orange top face texture
+        ctx.drawImage(inkCanvas, 0, 0);
+
+        // Build matching roughness map (sleek glossy metallic orange ~0.09 vs satin screen-print ink ~0.32)
+        const roughCanvas = document.createElement('canvas');
+        roughCanvas.width = size;
+        roughCanvas.height = size;
+        const rCtx = roughCanvas.getContext('2d');
+        rCtx.fillStyle = '#171717';
+        rCtx.fillRect(0, 0, size, size);
+
+        const finalInk = ictx.getImageData(0, 0, size, size);
+        const rImg = rCtx.getImageData(0, 0, size, size);
+        for (let i = 0; i < finalInk.data.length; i += 4) {
+          if (finalInk.data[i + 3] > 32) {
+            rImg.data[i] = 82;
+            rImg.data[i + 1] = 82;
+            rImg.data[i + 2] = 82;
+          }
+        }
+        rCtx.putImageData(rImg, 0, 0);
+
+        const colorTex = new THREE.CanvasTexture(canvas);
+        colorTex.colorSpace = THREE.SRGBColorSpace;
+        colorTex.anisotropy = 8;
+        colorTex.needsUpdate = true;
+
+        const roughTex = new THREE.CanvasTexture(roughCanvas);
+        roughTex.colorSpace = THREE.NoColorSpace;
+        roughTex.anisotropy = 8;
+        roughTex.needsUpdate = true;
+
+        return { colorTex, roughTex };
+      }
+
+      /**
+       * Creates the Rear Panel orange texture with the black rounded-square 'L' and 'R' badges
+       */
+      static createRearPanelTexture() {
+        const width = 1024;
+        const height = 512;
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+
+        ctx.fillStyle = AppConfig.colors.orangePaint;
+        ctx.fillRect(0, 0, width, height);
+
+        const mmToX = (mmX) => ((mmX + 75.0) / 150.0) * width;
+        const mmToY = (mmY) => ((43.5 - mmY) / 87.0) * height;
+        const sX = width / 150.0;
+        const sY = height / 87.0;
+
+        const drawBadge = (mmX, mmY, letter) => {
+          const cx = mmToX(mmX);
+          const cy = mmToY(mmY);
+          const bw = 4.6 * sX;
+          const bh = 4.6 * sY;
+          const r = 0.9 * sX;
+
+          ctx.fillStyle = '#181818';
+          ctx.beginPath();
+          ctx.roundRect(cx - bw / 2, cy - bh / 2, bw, bh, r);
+          ctx.fill();
+
+          ctx.fillStyle = AppConfig.colors.orangePaint;
+          ctx.font = `700 ${Math.round(3.1 * sY)}px "Inter", Arial, sans-serif`;
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(letter, cx, cy + 0.15 * sY);
+        };
+
+        drawBadge(-30.5, 22.8, 'L');
+        drawBadge(-50.5, 22.8, 'R');
+
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.colorSpace = THREE.SRGBColorSpace;
+        texture.anisotropy = 8;
+        texture.needsUpdate = true;
+        return texture;
+      }
+
+      /**
+       * Creates a tangent-space normal map for the embossed "COMPACT disc Recordable ReWritable" badge
+       */
+      static createCompactDiscBadgeNormalMap() {
+        const w = 256;
+        const h = 256;
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+
+        ctx.fillStyle = '#808080';
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.strokeStyle = '#c8c8c8';
+        ctx.lineWidth = 8;
+        ctx.strokeRect(14, 14, w - 28, h - 28);
+
+        ctx.fillStyle = '#eaeaea';
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 22px Arial, sans-serif';
+        ctx.fillText('COMPACT', w * 0.62, 52);
+
+        ctx.font = '900 72px "Arial Black", Impact, sans-serif';
+        ctx.fillText('disc', w * 0.5, 118);
+
+        ctx.strokeStyle = '#d8d8d8';
+        ctx.lineWidth = 4;
+        ctx.strokeRect(28, 136, w - 56, 40);
+        ctx.strokeRect(28, 184, w - 56, 40);
+
+        ctx.font = 'bold 24px Arial, sans-serif';
+        ctx.fillText('Recordable', w * 0.5, 164);
+        ctx.fillText('ReWritable', w * 0.5, 212);
+
+        const imgData = ctx.getImageData(0, 0, w, h).data;
+        const heights = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) {
+          heights[i] = imgData[i * 4] / 255.0;
+        }
+        return this.heightArrayToNormalTexture(heights, w, h, 3.8);
+      }
+
+      /**
+       * Creates the 5x7 dot-matrix character bitmap lookup for the 16x2 VFD display
+       */
+      static getLcdGlyph(char) {
+        const glyphs = {
+          'T': [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+          'r': [0b00000, 0b00000, 0b10110, 0b11001, 0b10000, 0b10000, 0b10000],
+          'a': [0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111],
+          'c': [0b00000, 0b00000, 0b01110, 0b10000, 0b10000, 0b10001, 0b01110],
+          'k': [0b10000, 0b10000, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010],
+          'P': [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000],
+          'u': [0b00000, 0b00000, 0b10001, 0b10001, 0b10001, 0b10011, 0b01101],
+          's': [0b00000, 0b00000, 0b01110, 0b10000, 0b01110, 0b00001, 0b11110],
+          'e': [0b00000, 0b00000, 0b01110, 0b10001, 0b11111, 0b10000, 0b01110],
+          'O': [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
+          'p': [0b00000, 0b00000, 0b11110, 0b10001, 0b11110, 0b10000, 0b10000],
+          'n': [0b00000, 0b00000, 0b10110, 0b11001, 0b10001, 0b10001, 0b10001],
+          '0': [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110],
+          '1': [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110],
+          '2': [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111],
+          '3': [0b11111, 0b00010, 0b00100, 0b00010, 0b00001, 0b10001, 0b01110],
+          '4': [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010],
+          '5': [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110],
+          '6': [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110],
+          '7': [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000],
+          '8': [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110],
+          '9': [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100],
+          ':': [0b00000, 0b01100, 0b01100, 0b00000, 0b01100, 0b01100, 0b00000],
+          ' ': [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b00000]
+        };
+        return glyphs[char] || glyphs[' '];
+      }
+    }
+
+    /**
+     * ============================================================================
+     * 4. MATERIAL LIBRARY
+     * ============================================================================
+     */
+    export class MaterialLibrary {
+      constructor() {
+        this.orangePeelNormal = ProceduralTextures.createOrangePeelNormalMap(1024);
+        this.woodSideMaps = ProceduralTextures.createWoodTextures(true);
+        this.woodEdgeMaps = ProceduralTextures.createWoodTextures(false);
+        this.topPanelMaps = ProceduralTextures.createTopPanelTexture();
+        this.rearPanelMap = ProceduralTextures.createRearPanelTexture();
+        this.cdBadgeNormal = ProceduralTextures.createCompactDiscBadgeNormalMap();
+
+        this.materials = {};
+        this.initMaterials();
+      }
+
+      initMaterials() {
+        // 1. Glossy Metallic-Enamel Orange Sheet-Metal (Deep saturated orange #e34a00 + sleek metallic shine)
+        this.materials.orangeMetal = new THREE.MeshPhysicalMaterial({
+          color: AppConfig.colors.orangePaintHex,
+          roughness: 0.11,
+          metalness: 0.18,
+          reflectivity: 1.0,
+          envMapIntensity: 1.15,
+          clearcoat: 1.0,
+          clearcoatRoughness: 0.035,
+          normalMap: this.orangePeelNormal,
+          normalScale: new THREE.Vector2(0.055, 0.055),
+          clearcoatNormalMap: this.orangePeelNormal,
+          clearcoatNormalScale: new THREE.Vector2(0.075, 0.075)
+        });
+
+        // 2. Top Panel Orange Metal with Stencil Artwork baked directly into the top surface texture
+        const topNormal = this.orangePeelNormal.clone();
+        topNormal.repeat.set(3.2, 3.8);
+        topNormal.needsUpdate = true;
+
+        this.materials.topPanelOrange = new THREE.MeshPhysicalMaterial({
+          map: this.topPanelMaps.colorTex,
+          roughnessMap: this.topPanelMaps.roughTex,
+          roughness: 0.85,
+          metalness: 0.18,
+          reflectivity: 1.0,
+          envMapIntensity: 1.15,
+          clearcoat: 1.0,
+          clearcoatRoughness: 0.035,
+          normalMap: topNormal,
+          normalScale: new THREE.Vector2(0.05, 0.05),
+          clearcoatNormalMap: topNormal,
+          clearcoatNormalScale: new THREE.Vector2(0.07, 0.07)
+        });
+
+        // 3. Rear Panel Orange Metal with L / R Silkscreen Badges
+        this.materials.rearPanelOrange = new THREE.MeshPhysicalMaterial({
+          map: this.rearPanelMap,
+          roughness: 0.11,
+          metalness: 0.18,
+          reflectivity: 1.0,
+          envMapIntensity: 1.15,
+          clearcoat: 1.0,
+          clearcoatRoughness: 0.035,
+          normalMap: this.orangePeelNormal,
+          normalScale: new THREE.Vector2(0.055, 0.055),
+          clearcoatNormalMap: this.orangePeelNormal,
+          clearcoatNormalScale: new THREE.Vector2(0.075, 0.075)
+        });
+
+        // 4. Photographic Natural Oak/Ash Wood Side Panels (Color + Tangent Normal Map + Roughness Map)
+        this.materials.woodSide = new THREE.MeshStandardMaterial({
+          map: this.woodSideMaps.colorTex,
+          normalMap: this.woodSideMaps.normalTex,
+          normalScale: new THREE.Vector2(0.62, 0.62),
+          roughnessMap: this.woodSideMaps.roughTex,
+          roughness: 0.92,
+          metalness: 0.02,
+          envMapIntensity: 1.15
+        });
+
+        this.materials.woodEdge = new THREE.MeshStandardMaterial({
+          map: this.woodEdgeMaps.colorTex,
+          normalMap: this.woodEdgeMaps.normalTex,
+          normalScale: new THREE.Vector2(0.50, 0.50),
+          roughnessMap: this.woodEdgeMaps.roughTex,
+          roughness: 0.92,
+          metalness: 0.02,
+          envMapIntensity: 1.15
+        });
+
+        // 5. Standard DVD-ROM Off-White / Cream ABS Plastic
+        this.materials.dvdBezelPlastic = new THREE.MeshStandardMaterial({
+          color: AppConfig.colors.dvdCream,
+          roughness: 0.52,
+          metalness: 0.02,
+          envMapIntensity: 1.1,
+          normalMap: this.orangePeelNormal,
+          normalScale: new THREE.Vector2(0.05, 0.05)
+        });
+
+        this.materials.dvdBadgePlastic = new THREE.MeshStandardMaterial({
+          color: AppConfig.colors.dvdCream,
+          roughness: 0.48,
+          metalness: 0.02,
+          envMapIntensity: 1.1,
+          normalMap: this.cdBadgeNormal,
+          normalScale: new THREE.Vector2(0.95, 0.95)
+        });
+
+        // 6. Matte Black Plastic (Switch Bezels, LCD Frame, IEC Socket, Rocker Switch)
+        this.materials.matteBlackPlastic = new THREE.MeshPhysicalMaterial({
+          color: AppConfig.colors.matteBlack,
+          roughness: 0.34,
+          metalness: 0.08,
+          clearcoat: 0.18,
+          clearcoatRoughness: 0.28,
+          envMapIntensity: 1.2
+        });
+
+        this.materials.deepRecessBlack = new THREE.MeshStandardMaterial({
+          color: 0x050506,
+          roughness: 0.92,
+          metalness: 0.0,
+          envMapIntensity: 0.2
+        });
+
+        // 7. Silver-White Tactile Button Caps (Matches reference crisp bevelled silver-grey caps)
+        this.materials.silverCap = new THREE.MeshPhysicalMaterial({
+          color: AppConfig.colors.silverCap,
+          roughness: 0.22,
+          metalness: 0.16,
+          clearcoat: 0.35,
+          clearcoatRoughness: 0.18,
+          envMapIntensity: 1.15
+        });
+
+        // 8. Dark Gunmetal Eject Button Cap (Bottom-Right of Top Panel with subtle metallic sheen)
+        this.materials.darkGunmetalCap = new THREE.MeshPhysicalMaterial({
+          color: AppConfig.colors.darkCap,
+          roughness: 0.26,
+          metalness: 0.38,
+          clearcoat: 0.32,
+          clearcoatRoughness: 0.20,
+          envMapIntensity: 1.25
+        });
+
+        // 9. White Fader Center Inlay
+        this.materials.whiteInlay = new THREE.MeshBasicMaterial({
+          color: 0xf8f8f8
+        });
+
+        // 10. Bright Chrome / Nickel (RCA Jack Barrels & Pins)
+        this.materials.chrome = new THREE.MeshStandardMaterial({
+          color: AppConfig.colors.chrome,
+          roughness: 0.08,
+          metalness: 0.96,
+          envMapIntensity: 1.65
+        });
+
+        // 11. RCA Insulators (White L & Red R)
+        this.materials.rcaWhite = new THREE.MeshStandardMaterial({
+          color: AppConfig.colors.rcaWhite,
+          roughness: 0.28,
+          metalness: 0.02
+        });
+        this.materials.rcaRed = new THREE.MeshStandardMaterial({
+          color: AppConfig.colors.rcaRed,
+          roughness: 0.28,
+          metalness: 0.02
+        });
+
+        // 12. Rubber Feet
+        this.materials.rubberFoot = new THREE.MeshStandardMaterial({
+          color: 0x111112,
+          roughness: 0.85,
+          metalness: 0.02
+        });
+
+        // 13. Front DVD Drive Illuminated Emerald-Green LED Indicator
+        this.materials.dvdLed = new THREE.MeshStandardMaterial({
+          color: 0x35ff58,
+          emissive: new THREE.Color(0x1eff42),
+          emissiveIntensity: 3.8,
+          roughness: 0.12,
+          metalness: 0.0
+        });
+      }
+
+      get(name) {
+        return this.materials[name];
+      }
+    }
+
+    /**
+     * ============================================================================
+     * 5. MODULAR 3D DEVICE COMPONENTS
+     * ============================================================================
+     */
+
+    /**
+     * 5.1 CHASSIS COMPONENT (Orange Powder-Coated Sheet-Metal Enclosure & Rubber Feet)
+     */
+    export class ChassisComponent extends Component3D {
+      init() {
+        const { chassisWidth, chassisHeight, chassisDepth, dvdBezelWidth, dvdBezelHeight } = AppConfig.dimensions;
+        const mats = this.context.materials;
+
+        // Inner dark core block to prevent any light leaks around recessed bays
+        const innerCoreGeo = new THREE.BoxGeometry(chassisWidth - 1.6, chassisHeight - 1.6, chassisDepth - 2.0);
+        const innerCore = new THREE.Mesh(innerCoreGeo, mats.get('deepRecessBlack'));
+        this.group.add(innerCore);
+
+        // Top Orange Panel Structural Plate
+        const topPlateGeo = new RoundedBoxGeometry(chassisWidth, 1.8, chassisDepth, 3, 0.7);
+        const topPlate = new THREE.Mesh(topPlateGeo, mats.get('orangeMetal'));
+        topPlate.position.set(0, chassisHeight / 2 - 0.9, 0);
+        topPlate.castShadow = true;
+        topPlate.receiveShadow = true;
+        this.group.add(topPlate);
+
+        // Exact 1:1 Planar UV Top Surface Sheet (`150.0mm x 182.0mm`) so silkscreen & stencil align mathematically with 3D controls
+        const topSurfaceGeo = new THREE.PlaneGeometry(chassisWidth - 0.2, chassisDepth - 0.2);
+        topSurfaceGeo.rotateX(-Math.PI / 2);
+        const topSurface = new THREE.Mesh(topSurfaceGeo, mats.get('topPanelOrange'));
+        topSurface.position.set(0, chassisHeight / 2 + 0.01, 0);
+        topSurface.receiveShadow = true;
+        this.group.add(topSurface);
+
+        // Bottom Orange Base Plate
+        const botPlateGeo = new RoundedBoxGeometry(chassisWidth, 1.4, chassisDepth, 2, 0.5);
+        const botPlate = new THREE.Mesh(botPlateGeo, mats.get('orangeMetal'));
+        botPlate.position.set(0, -chassisHeight / 2 + 0.7, 0);
+        botPlate.castShadow = true;
+        this.group.add(botPlate);
+
+        // Upper Front Orange Faceplate (`150mm` wide x `43.2mm` high, above the DVD drive bay)
+        const upperFrontHeight = chassisHeight - dvdBezelHeight - 1.8; // 43.2 mm
+        const upperFrontGeo = new RoundedBoxGeometry(chassisWidth, upperFrontHeight, 2.2, 3, 0.65);
+        const upperFront = new THREE.Mesh(upperFrontGeo, mats.get('orangeMetal'));
+        upperFront.position.set(0, chassisHeight / 2 - upperFrontHeight / 2, chassisDepth / 2 - 1.1);
+        upperFront.castShadow = true;
+        upperFront.receiveShadow = true;
+        this.group.add(upperFront);
+
+        // Thin 1mm Orange Sheet-Metal Lip Framing the Lower DVD-ROM Bezel (Left, Right, Bottom)
+        const lipWidth = (chassisWidth - dvdBezelWidth) / 2; // 1.0 mm
+        const sideLipGeo = new THREE.BoxGeometry(lipWidth, dvdBezelHeight + 1.8, 2.0);
+
+        const leftLip = new THREE.Mesh(sideLipGeo, mats.get('orangeMetal'));
+        leftLip.position.set(-chassisWidth / 2 + lipWidth / 2, -chassisHeight / 2 + (dvdBezelHeight + 1.8) / 2, chassisDepth / 2 - 1.0);
+        this.group.add(leftLip);
+
+        const rightLip = new THREE.Mesh(sideLipGeo, mats.get('orangeMetal'));
+        rightLip.position.set(chassisWidth / 2 - lipWidth / 2, -chassisHeight / 2 + (dvdBezelHeight + 1.8) / 2, chassisDepth / 2 - 1.0);
+        this.group.add(rightLip);
+
+        const bottomLipGeo = new THREE.BoxGeometry(chassisWidth, 1.1, 2.2);
+        const bottomLip = new THREE.Mesh(bottomLipGeo, mats.get('orangeMetal'));
+        bottomLip.position.set(0, -chassisHeight / 2 + 0.55, chassisDepth / 2 - 1.1);
+        this.group.add(bottomLip);
+
+        // Rear Orange Panel Plate (with 'L' and 'R' silkscreen badges)
+        const rearPlateGeo = new RoundedBoxGeometry(chassisWidth, chassisHeight, 2.0, 3, 0.65);
+        const rearPlate = new THREE.Mesh(rearPlateGeo, [
+          mats.get('orangeMetal'),
+          mats.get('orangeMetal'),
+          mats.get('orangeMetal'),
+          mats.get('orangeMetal'),
+          mats.get('orangeMetal'),
+          mats.get('rearPanelOrange') // -Z rear face
+        ]);
+        rearPlate.position.set(0, 0, -chassisDepth / 2 + 1.0);
+        rearPlate.castShadow = true;
+        rearPlate.receiveShadow = true;
+        this.group.add(rearPlate);
+
+        // 4 Black Cylindrical Rubber Feet on the underside
+        const { footRadius, footHeight, footInsetX, footInsetZ } = AppConfig.dimensions;
+        const footGeo = new THREE.CylinderGeometry(footRadius, footRadius * 0.92, footHeight, 32);
+        const footPositions = [
+          [-footInsetX, -footInsetZ],
+          [footInsetX, -footInsetZ],
+          [-footInsetX, footInsetZ],
+          [footInsetX, footInsetZ]
+        ];
+        for (const [fx, fz] of footPositions) {
+          const foot = new THREE.Mesh(footGeo, mats.get('rubberFoot'));
+          foot.position.set(fx, -chassisHeight / 2 - footHeight / 2 + 0.3, fz);
+          foot.castShadow = true;
+          foot.receiveShadow = true;
+          this.group.add(foot);
+        }
+      }
+    }
+
+    /**
+     * 5.2 WOOD CHEEKS COMPONENT (Solid Natural Oak/Ash Wood Side Panels)
+     */
+    export class WoodCheeksComponent extends Component3D {
+      init() {
+        const { chassisWidth, woodThickness, woodHeight, woodDepth, woodBevel } = AppConfig.dimensions;
+        const mats = this.context.materials;
+
+        const cheekGeo = new RoundedBoxGeometry(woodThickness, woodHeight, woodDepth, 3, woodBevel);
+        const cheekMaterials = [
+          mats.get('woodSide'), // +X outer side
+          mats.get('woodSide'), // -X inner side
+          mats.get('woodEdge'), // +Y top edge
+          mats.get('woodEdge'), // -Y bottom edge
+          mats.get('woodEdge'), // +Z front edge
+          mats.get('woodEdge')  // -Z rear edge
+        ];
+
+        const offsetX = chassisWidth / 2 + woodThickness / 2;
+
+        const leftCheek = new THREE.Mesh(cheekGeo, cheekMaterials);
+        leftCheek.position.set(-offsetX, 0, 0);
+        leftCheek.castShadow = true;
+        leftCheek.receiveShadow = true;
+        this.group.add(leftCheek);
+
+        const rightCheek = new THREE.Mesh(cheekGeo, cheekMaterials);
+        rightCheek.position.set(offsetX, 0, 0);
+        rightCheek.castShadow = true;
+        rightCheek.receiveShadow = true;
+        this.group.add(rightCheek);
+      }
+    }
+
+    /**
+     * 5.3 STANDARD 5.25" DVD-ROM DRIVE COMPONENT (Lower Front Bay)
+     * Reference Scale: 148.0 mm wide x 42.0 mm high
+     */
+    export class DvdDriveComponent extends Component3D {
+      init() {
+        const { chassisHeight, chassisDepth, dvdBezelWidth, dvdBezelHeight, dvdBezelDepth } = AppConfig.dimensions;
+        const mats = this.context.materials;
+
+        const bezelCenterY = -chassisHeight / 2 + 1.1 + dvdBezelHeight / 2;
+        const bezelFrontZ = chassisDepth / 2 - 0.6;
+
+        this.group.position.set(0, bezelCenterY, bezelFrontZ);
+
+        // 1. Main Off-White / Cream ABS Plastic Outer Bezel (148mm x 42mm)
+        const bezelGeo = new RoundedBoxGeometry(dvdBezelWidth, dvdBezelHeight, dvdBezelDepth, 3, 0.75);
+        const bezelMesh = new THREE.Mesh(bezelGeo, mats.get('dvdBezelPlastic'));
+        bezelMesh.position.set(0, 0, -dvdBezelDepth / 2);
+        bezelMesh.castShadow = true;
+        bezelMesh.receiveShadow = true;
+        this.group.add(bezelMesh);
+
+        // 2. Dark Recessed Tray Cavity Opening
+        const slotWidth = 136.4;
+        const slotHeight = 18.4;
+        const slotY = 4.6;
+        const slotRecessGeo = new THREE.BoxGeometry(slotWidth, slotHeight, 2.4);
+        const slotRecess = new THREE.Mesh(slotRecessGeo, mats.get('deepRecessBlack'));
+        slotRecess.position.set(0, slotY, -0.45);
+        this.group.add(slotRecess);
+
+        // 3. Sliding Motorized Disc Tray Group (Animates along +Z when Eject is triggered)
+        this.trayGroup = new THREE.Group();
+        this.trayGroup.position.set(0, slotY, 0);
+        this.group.add(this.trayGroup);
+
+        // Raised Cream Plastic Tray Door (135.0mm x 17.0mm)
+        const trayDoorGeo = new RoundedBoxGeometry(135.0, 17.0, 2.6, 3, 0.85);
+        const trayDoor = new THREE.Mesh(trayDoorGeo, mats.get('dvdBezelPlastic'));
+        trayDoor.position.set(0, 0, 0.35);
+        trayDoor.castShadow = true;
+        trayDoor.receiveShadow = true;
+        this.trayGroup.add(trayDoor);
+
+        // Embossed Central "COMPACT disc Recordable ReWritable" Badge
+        const badgeGeo = new RoundedBoxGeometry(14.5, 13.4, 0.5, 2, 0.25);
+        const badgeMesh = new THREE.Mesh(badgeGeo, mats.get('dvdBadgePlastic'));
+        badgeMesh.position.set(0, 0, 1.52);
+        this.trayGroup.add(badgeMesh);
+
+        // Internal Sliding Platter & Optical Disc (visible when tray ejects)
+        const platterGeo = new RoundedBoxGeometry(128.0, 2.2, 136.0, 2, 0.5);
+        const platterMesh = new THREE.Mesh(platterGeo, mats.get('matteBlackPlastic'));
+        platterMesh.position.set(0, -5.5, -68.5);
+        this.trayGroup.add(platterMesh);
+
+        const discGeo = new THREE.CylinderGeometry(58.0, 58.0, 0.8, 48);
+        const discMat = new THREE.MeshPhysicalMaterial({
+          color: 0xe8f0ff,
+          metalness: 0.85,
+          roughness: 0.12,
+          iridescence: 1.0,
+          iridescenceIOR: 1.35,
+          clearcoat: 1.0
+        });
+        this.discMesh = new THREE.Mesh(discGeo, discMat);
+        this.discMesh.position.set(0, -4.1, -68.5);
+        this.trayGroup.add(this.discMesh);
+
+        // 4. Lower-Left Emerald-Green Activity LED + Optical Bloom Halo
+        const ledX = -56.2;
+        const ledY = -12.2;
+
+        const ledRecessGeo = new THREE.BoxGeometry(5.2, 2.4, 1.2);
+        const ledRecess = new THREE.Mesh(ledRecessGeo, mats.get('deepRecessBlack'));
+        ledRecess.position.set(ledX, ledY, -0.05);
+        this.group.add(ledRecess);
+
+        const ledLensGeo = new RoundedBoxGeometry(4.4, 1.7, 0.9, 2, 0.25);
+        this.ledMesh = new THREE.Mesh(ledLensGeo, mats.get('dvdLed'));
+        this.ledMesh.position.set(ledX, ledY, 0.12);
+        this.group.add(this.ledMesh);
+
+        // Optical Additive Bloom Sprite/Halo for the Green LED
+        const bloomCanvas = document.createElement('canvas');
+        bloomCanvas.width = 128;
+        bloomCanvas.height = 128;
+        const bctx = bloomCanvas.getContext('2d');
+        const bGrad = bctx.createRadialGradient(64, 64, 2, 64, 64, 60);
+        bGrad.addColorStop(0.0, 'rgba(180, 255, 195, 0.95)');
+        bGrad.addColorStop(0.22, 'rgba(45, 255, 90, 0.65)');
+        bGrad.addColorStop(0.55, 'rgba(15, 210, 60, 0.20)');
+        bGrad.addColorStop(1.0, 'rgba(0, 180, 40, 0.0)');
+        bctx.fillStyle = bGrad;
+        bctx.fillRect(0, 0, 128, 128);
+
+        const bloomTex = new THREE.CanvasTexture(bloomCanvas);
+        const bloomMat = new THREE.MeshBasicMaterial({
+          map: bloomTex,
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false
+        });
+        const bloomPlaneGeo = new THREE.PlaneGeometry(16.0, 10.5);
+        this.ledBloomMesh = new THREE.Mesh(bloomPlaneGeo, bloomMat);
+        this.ledBloomMesh.position.set(ledX, ledY, 0.75);
+        this.group.add(this.ledBloomMesh);
+
+        // 5. Emergency Eject Pinhole (Right of Center)
+        const pinholeGeo = new THREE.CylinderGeometry(0.85, 0.85, 1.5, 16);
+        pinholeGeo.rotateX(Math.PI / 2);
+        const pinholeMesh = new THREE.Mesh(pinholeGeo, mats.get('deepRecessBlack'));
+        pinholeMesh.position.set(34.5, -9.8, -0.1);
+        this.group.add(pinholeMesh);
+
+        // 6. Pill-Shaped Drive Eject Push-Button (Lower-Right of Bezel)
+        const btnX = 48.0;
+        const btnY = -12.0;
+        const pillLength = 14.0;
+        const pillRadius = 2.3;
+
+        const createPillShape = (len, rad) => {
+          const shape = new THREE.Shape();
+          const halfL = len / 2;
+          shape.moveTo(-halfL, -rad);
+          shape.lineTo(halfL, -rad);
+          shape.absarc(halfL, 0, rad, -Math.PI / 2, Math.PI / 2, false);
+          shape.lineTo(-halfL, rad);
+          shape.absarc(-halfL, 0, rad, Math.PI / 2, (3 * Math.PI) / 2, false);
+          return shape;
+        };
+
+        const recessShape = createPillShape(pillLength + 0.8, pillRadius + 0.45);
+        const recessGeo = new THREE.ExtrudeGeometry(recessShape, { depth: 1.2, bevelEnabled: false });
+        const btnRecess = new THREE.Mesh(recessGeo, mats.get('deepRecessBlack'));
+        btnRecess.position.set(btnX, btnY, -0.65);
+        this.group.add(btnRecess);
+
+        const btnShape = createPillShape(pillLength, pillRadius);
+        const btnGeo = new THREE.ExtrudeGeometry(btnShape, {
+          depth: 1.6,
+          bevelEnabled: true,
+          bevelThickness: 0.45,
+          bevelSize: 0.35,
+          bevelSegments: 3
+        });
+        this.ejectBtnMesh = new THREE.Mesh(btnGeo, mats.get('dvdBezelPlastic'));
+        this.ejectBtnMesh.position.set(btnX, btnY, -0.6);
+        this.ejectBtnMesh.castShadow = true;
+        this.group.add(this.ejectBtnMesh);
+
+        this.registerInteractable(this.ejectBtnMesh, {
+          type: 'button',
+          action: 'toggleTray',
+          pressAxis: 'z',
+          basePos: -0.6,
+          pressDepth: -1.15
+        });
+      }
+
+      update(delta) {
+        const state = this.context.state;
+        const targetZ = (state.powerOn && state.trayOpen) ? 105.0 : 0.0;
+        this.trayGroup.position.z += (targetZ - this.trayGroup.position.z) * Math.min(1.0, delta * 7.5);
+
+        if (state.powerOn && state.isPlaying && !state.trayOpen) {
+          this.discMesh.rotation.y += delta * 12.0;
+        }
+
+        this.ledMesh.visible = state.powerOn;
+        this.ledBloomMesh.visible = state.powerOn;
+      }
+    }
+
+    /**
+     * 5.4 16x2 DOT-MATRIX LCD DISPLAY COMPONENT (Upper-Left of Top Panel)
+     * Reverted to the clean, crisp, rock-solid 16x2 backlit LCD design matching the reference photo
+     */
+    export class LcdDisplayComponent extends Component3D {
+      init() {
+        const { chassisHeight } = AppConfig.dimensions;
+        const layout = AppConfig.topLayout.lcd;
+        const mats = this.context.materials;
+
+        const topY = chassisHeight / 2; // +43.5 mm
+        this.group.position.set(layout.x, topY, layout.z);
+
+        const frameW = layout.bezelW;
+        const frameD = layout.bezelD;
+        const winW = layout.winW;
+        const winD = layout.winD;
+
+        // Matte black bevelled outer bezel frame (`81.4mm x 25.2mm`)
+        const outerShape = new THREE.Shape();
+        outerShape.moveTo(-frameW / 2, -frameD / 2);
+        outerShape.lineTo(frameW / 2, -frameD / 2);
+        outerShape.lineTo(frameW / 2, frameD / 2);
+        outerShape.lineTo(-frameW / 2, frameD / 2);
+        outerShape.closePath();
+
+        const holePath = new THREE.Path();
+        holePath.moveTo(-winW / 2, -winD / 2);
+        holePath.lineTo(winW / 2, -winD / 2);
+        holePath.lineTo(winW / 2, winD / 2);
+        holePath.lineTo(-winW / 2, winD / 2);
+        holePath.closePath();
+        outerShape.holes.push(holePath);
+
+        const bezelGeo = new THREE.ExtrudeGeometry(outerShape, {
+          depth: 2.2,
+          bevelEnabled: true,
+          bevelThickness: 0.55,
+          bevelSize: 0.45,
+          bevelSegments: 3
+        });
+        bezelGeo.rotateX(Math.PI / 2);
+        const bezelMesh = new THREE.Mesh(bezelGeo, mats.get('matteBlackPlastic'));
+        bezelMesh.position.set(0, 2.25, 0);
+        bezelMesh.castShadow = true;
+        bezelMesh.receiveShadow = true;
+        this.group.add(bezelMesh);
+
+        // Dark recessed interior well walls behind the LCD window
+        const wellGeo = new THREE.BoxGeometry(winW + 1.2, 1.2, winD + 1.2);
+        const wellMesh = new THREE.Mesh(wellGeo, mats.get('deepRecessBlack'));
+        wellMesh.position.set(0, 0.3, 0);
+        this.group.add(wellMesh);
+
+        // Dynamic Canvas Texture for the 16x2 character LCD screen (clean, self-illuminated, zero external overlay planes)
+        this.lcdCanvas = document.createElement('canvas');
+        this.lcdCanvas.width = 1024;
+        this.lcdCanvas.height = 256;
+        this.lcdCtx = this.lcdCanvas.getContext('2d');
+
+        this.lcdTexture = new THREE.CanvasTexture(this.lcdCanvas);
+        this.lcdTexture.colorSpace = THREE.SRGBColorSpace;
+        this.lcdTexture.minFilter = THREE.LinearFilter;
+        this.lcdTexture.magFilter = THREE.LinearFilter;
+        this.lcdTexture.anisotropy = 8;
+
+        // Self-illuminated MeshBasicMaterial so the backlit amber/yellow screen is always 100% crisp and immune to shader/z-fighting artifacts
+        this.lcdMaterial = new THREE.MeshBasicMaterial({
+          map: this.lcdTexture
+        });
+
+        const screenGeo = new THREE.PlaneGeometry(winW + 0.4, winD + 0.4);
+        screenGeo.rotateX(-Math.PI / 2);
+        this.screenMesh = new THREE.Mesh(screenGeo, this.lcdMaterial);
+        this.screenMesh.position.set(0, 0.95, 0);
+        this.group.add(this.screenMesh);
+
+        this.lastRenderedText = '';
+        this.renderLcdScreen();
+      }
+
+      formatTime(totalSec) {
+        const mins = Math.floor(totalSec / 60);
+        const secs = Math.floor(totalSec % 60);
+        const frames = Math.floor((totalSec - Math.floor(totalSec)) * 100);
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${pad(mins)}:${pad(secs)}:${pad(frames)}`;
+      }
+
+      renderLcdScreen() {
+        const state = this.context.state;
+        const line1 = !state.powerOn
+          ? '                '
+          : state.trayOpen
+            ? '     Open       '
+            : `    Track ${state.track}     `;
+        const line2 = !state.powerOn
+          ? '                '
+          : `   ${this.formatTime(state.elapsedSeconds)}     `;
+
+        const key = `${state.powerOn}|${line1}|${line2}`;
+        if (key === this.lastRenderedText) return;
+        this.lastRenderedText = key;
+
+        const ctx = this.lcdCtx;
+        const w = this.lcdCanvas.width;
+        const h = this.lcdCanvas.height;
+
+        if (!state.powerOn) {
+          ctx.fillStyle = '#1f1408';
+          ctx.fillRect(0, 0, w, h);
+          this.lcdTexture.needsUpdate = true;
+          return;
+        }
+
+        // Authentic Amber/Orange Backlit Cavity Gradient matching the Top View reference photo:
+        // Warm golden-amber luminous border framing a deeper amber-orange center
+        ctx.fillStyle = '#f2ab22';
+        ctx.fillRect(0, 0, w, h);
+
+        const grad = ctx.createRadialGradient(w * 0.5, h * 0.5, h * 0.10, w * 0.5, h * 0.5, w * 0.50);
+        grad.addColorStop(0.0, '#a8470c');
+        grad.addColorStop(0.55, '#b8500e');
+        grad.addColorStop(0.82, '#d87914');
+        grad.addColorStop(0.96, '#f0a620');
+        grad.addColorStop(1.0, '#f5b428');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+
+        // Subtle inner bezel shadow along top & bottom edges of the recessed LCD window
+        const topEdgeGrad = ctx.createLinearGradient(0, 0, 0, 22);
+        topEdgeGrad.addColorStop(0.0, 'rgba(30, 10, 0, 0.45)');
+        topEdgeGrad.addColorStop(1.0, 'rgba(30, 10, 0, 0.0)');
+        ctx.fillStyle = topEdgeGrad;
+        ctx.fillRect(0, 0, w, 22);
+
+        // Draw 16x2 character cell matrix (5x7 dot-matrix per character)
+        const cols = 16;
+        const rows = 2;
+        const marginX = 64;
+        const marginY = 24;
+        const availW = w - marginX * 2;
+        const availH = h - marginY * 2;
+        const cellW = availW / cols;
+        const cellH = availH / rows;
+        const dotStepX = (cellW * 0.80) / 5;
+        const dotStepY = (cellH * 0.84) / 7;
+        const dotSizeX = dotStepX * 0.78;
+        const dotSizeY = dotStepY * 0.78;
+
+        const lines = [line1.padEnd(16, ' ').slice(0, 16), line2.padEnd(16, ' ').slice(0, 16)];
+
+        for (let r = 0; r < rows; r++) {
+          const text = lines[r];
+          for (let c = 0; c < cols; c++) {
+            const glyph = ProceduralTextures.getLcdGlyph(text[c]);
+            const cellOriginX = marginX + c * cellW + cellW * 0.10;
+            const cellOriginY = marginY + r * cellH + cellH * 0.08;
+
+            // Faint 5x7 unlit character matrix box (visible in reference photo)
+            ctx.fillStyle = 'rgba(70, 24, 2, 0.12)';
+            ctx.fillRect(cellOriginX - 2, cellOriginY - 2, dotStepX * 5 + 2, dotStepY * 7 + 2);
+
+            for (let gy = 0; gy < 7; gy++) {
+              const rowBits = glyph[gy];
+              for (let gx = 0; gx < 5; gx++) {
+                const isLit = (rowBits >> (4 - gx)) & 1;
+                const px = cellOriginX + gx * dotStepX;
+                const py = cellOriginY + gy * dotStepY;
+
+                if (isLit) {
+                  // Soft amber pixel halo + bright yellow-amber LED/VFD dot core
+                  ctx.save();
+                  ctx.shadowColor = '#ffae00';
+                  ctx.shadowBlur = 6;
+                  ctx.fillStyle = '#fff55a';
+                  ctx.fillRect(px, py, dotSizeX, dotSizeY);
+                  ctx.restore();
+
+                  ctx.fillStyle = '#ffffa8';
+                  ctx.fillRect(px + 0.5, py + 0.5, dotSizeX - 1.0, dotSizeY - 1.0);
+                } else {
+                  ctx.fillStyle = 'rgba(80, 28, 4, 0.24)';
+                  ctx.fillRect(px, py, dotSizeX, dotSizeY);
+                }
+              }
+            }
+          }
+        }
+
+        this.lcdTexture.needsUpdate = true;
+      }
+
+      update(delta) {
+        const state = this.context.state;
+        if (state.powerOn && state.isPlaying && !state.trayOpen) {
+          const pitchRate = 1.0 - state.pitchNormalized * 0.16;
+          state.elapsedSeconds += delta * pitchRate;
+        }
+        this.renderLcdScreen();
+      }
+    }
+
+    /**
+     * 5.5 TOP PANEL CONTROLS COMPONENT (6 Push-Buttons + Draggable Pitch Fader)
+     * Uses the exact coordinates from `AppConfig.topLayout` for 1:1 alignment with the silkscreen icons
+     */
+    export class TopPanelControlsComponent extends Component3D {
+      init() {
+        const { chassisHeight } = AppConfig.dimensions;
+        const layout = AppConfig.topLayout;
+        const mats = this.context.materials;
+        const topY = chassisHeight / 2; // +43.5 mm
+
+        const createPushButton = ({ x, z, bezelW, bezelD, capW, capD, capMat, action }) => {
+          const btnGroup = new THREE.Group();
+          btnGroup.position.set(x, topY, z);
+
+          // 1. Outer bevelled matte-black switch housing/collar
+          const bezelGeo = new RoundedBoxGeometry(bezelW, 1.5, bezelD, 3, 0.35);
+          const bezelMesh = new THREE.Mesh(bezelGeo, mats.get('matteBlackPlastic'));
+          bezelMesh.position.set(0, 0.55, 0);
+          bezelMesh.castShadow = true;
+          bezelMesh.receiveShadow = true;
+          btnGroup.add(bezelMesh);
+
+          // 2. Crisp dark recessed perimeter gap around the tactile cap
+          const gapGeo = new THREE.BoxGeometry(capW + 1.1, 1.65, capD + 1.1);
+          const gapMesh = new THREE.Mesh(gapGeo, mats.get('deepRecessBlack'));
+          gapMesh.position.set(0, 0.58, 0);
+          btnGroup.add(gapMesh);
+
+          // 3. Chamfered tactile switch cap matching the reference photo's bevelled edges
+          const capGeo = new RoundedBoxGeometry(capW, 2.8, capD, 4, 0.65);
+          const capMesh = new THREE.Mesh(capGeo, capMat);
+          capMesh.position.set(0, 1.35, 0);
+          capMesh.castShadow = true;
+          capMesh.receiveShadow = true;
+          btnGroup.add(capMesh);
+
+          this.registerInteractable(capMesh, {
+            type: 'button',
+            action,
+            pressAxis: 'y',
+            basePos: 1.35,
+            pressDepth: 0.65
+          });
+
+          this.group.add(btnGroup);
+          return capMesh;
+        };
+
+        // 1. Upper-Right Track Skip Previous (`|◀`)
+        createPushButton({
+          ...layout.btnPrev,
+          capMat: mats.get('silverCap'),
+          action: 'prevTrack'
+        });
+
+        // 2. Upper-Right Track Skip Next (`▶|`)
+        createPushButton({
+          ...layout.btnNext,
+          capMat: mats.get('silverCap'),
+          action: 'nextTrack'
+        });
+
+        // 3. Bottom-Left Rectangular Play/Pause Button (`▶||`)
+        createPushButton({
+          ...layout.btnPlay,
+          capMat: mats.get('silverCap'),
+          action: 'playPause'
+        });
+
+        // 4. Bottom-Center-Left Rewind Button (`◀◀`)
+        createPushButton({
+          ...layout.btnRew,
+          capMat: mats.get('silverCap'),
+          action: 'rewind'
+        });
+
+        // 5. Bottom-Center-Right Fast-Forward Button (`▶▶`)
+        createPushButton({
+          ...layout.btnFf,
+          capMat: mats.get('silverCap'),
+          action: 'fastForward'
+        });
+
+        // 6. Bottom-Right Dark Gunmetal Eject Button (`⏏`)
+        createPushButton({
+          ...layout.btnEject,
+          capMat: mats.get('darkGunmetalCap'),
+          action: 'toggleTray'
+        });
+
+        // --- 7. PITCH SLIDE POTENTIOMETER (Aligned with `layout.pitch`) ---
+        this.pitchCenterZ = layout.pitch.centerZ;
+        this.pitchTravelHalf = layout.pitch.halfTravel;
+
+        const slotLength = (layout.pitch.botZ - layout.pitch.topZ) + 1.5;
+        const slotGeo = new THREE.BoxGeometry(2.0, 0.8, slotLength);
+        const slotMesh = new THREE.Mesh(slotGeo, mats.get('deepRecessBlack'));
+        slotMesh.position.set(layout.pitch.x, topY + 0.05, this.pitchCenterZ);
+        this.group.add(slotMesh);
+
+        this.faderGroup = new THREE.Group();
+        const initialZ = this.pitchCenterZ + this.context.state.pitchNormalized * this.pitchTravelHalf;
+        this.faderGroup.position.set(layout.pitch.x, topY, initialZ);
+        this.group.add(this.faderGroup);
+
+        const stemGeo = new THREE.BoxGeometry(1.4, 4.0, 4.2);
+        const stemMesh = new THREE.Mesh(stemGeo, mats.get('chrome'));
+        stemMesh.position.set(0, 1.5, 0);
+        this.faderGroup.add(stemMesh);
+
+        // Tapered fader knob body extruded along X (`21.5mm` wide, `10.8mm` tall)
+        const knobW = 21.5;
+        const knobH = 10.8;
+        const baseHalfD = 4.5;
+        const topHalfD = 3.2;
+
+        const knobProfile = new THREE.Shape();
+        knobProfile.moveTo(-baseHalfD, 0);
+        knobProfile.lineTo(baseHalfD, 0);
+        knobProfile.lineTo(topHalfD, knobH);
+        knobProfile.lineTo(-topHalfD, knobH);
+        knobProfile.closePath();
+
+        const knobGeo = new THREE.ExtrudeGeometry(knobProfile, {
+          depth: knobW - 1.2,
+          bevelEnabled: true,
+          bevelThickness: 0.6,
+          bevelSize: 0.55,
+          bevelSegments: 3
+        });
+        knobGeo.rotateY(Math.PI / 2);
+        knobGeo.translate(-(knobW - 1.2) / 2, 0.4, 0);
+
+        this.faderKnobMesh = new THREE.Mesh(knobGeo, mats.get('matteBlackPlastic'));
+        this.faderKnobMesh.castShadow = true;
+        this.faderKnobMesh.receiveShadow = true;
+        this.faderGroup.add(this.faderKnobMesh);
+
+        const stripeGeo = new RoundedBoxGeometry(knobW - 2.2, 0.6, 1.5, 2, 0.25);
+        const stripeMesh = new THREE.Mesh(stripeGeo, mats.get('whiteInlay'));
+        stripeMesh.position.set(0, knobH + 0.72, 0);
+        this.faderGroup.add(stripeMesh);
+
+        this.registerInteractable(this.faderKnobMesh, {
+          type: 'fader',
+          faderGroup: this.faderGroup,
+          minZ: this.pitchCenterZ - this.pitchTravelHalf,
+          maxZ: this.pitchCenterZ + this.pitchTravelHalf,
+          centerZ: this.pitchCenterZ,
+          halfTravel: this.pitchTravelHalf
+        });
+      }
+    }
+
+    /**
+     * 5.6 REAR PANEL COMPONENT (IEC C8 Figure-8 Inlet, I/O Rocker Switch, L & R RCA Jacks)
+     * Positioned on the rear face at Z = -91.0mm
+     */
+    export class RearPanelComponent extends Component3D {
+      init() {
+        const { chassisDepth } = AppConfig.dimensions;
+        const mats = this.context.materials;
+        const rearZ = -chassisDepth / 2; // -91.0 mm
+
+        this.group.position.set(0, 0, rearZ);
+
+        // --- 1. IEC C8 ("Figure-8") AC Power Inlet (World X = -45.5mm, Y = +9.0mm) ---
+        const iecGroup = new THREE.Group();
+        iecGroup.position.set(-45.5, 9.0, 0);
+        this.group.add(iecGroup);
+
+        const iecBezelGeo = new RoundedBoxGeometry(22.5, 15.2, 2.2, 2, 0.35);
+        const iecBezel = new THREE.Mesh(iecBezelGeo, mats.get('matteBlackPlastic'));
+        iecBezel.position.set(0, 0, -0.35);
+        iecGroup.add(iecBezel);
+
+        const cavityGroup = new THREE.Group();
+        cavityGroup.position.set(0, 0, -0.95);
+        iecGroup.add(cavityGroup);
+
+        const lobeGeo = new THREE.CylinderGeometry(4.9, 4.9, 1.2, 24);
+        lobeGeo.rotateX(Math.PI / 2);
+        const leftLobe = new THREE.Mesh(lobeGeo, mats.get('deepRecessBlack'));
+        leftLobe.position.set(-4.3, 0, 0);
+        cavityGroup.add(leftLobe);
+
+        const rightLobe = new THREE.Mesh(lobeGeo, mats.get('deepRecessBlack'));
+        rightLobe.position.set(4.3, 0, 0);
+        cavityGroup.add(rightLobe);
+
+        const keyGeo = new THREE.BoxGeometry(2.2, 2.4, 1.3);
+        const topKey = new THREE.Mesh(keyGeo, mats.get('matteBlackPlastic'));
+        topKey.position.set(0, 4.2, -0.9);
+        iecGroup.add(topKey);
+        const botKey = new THREE.Mesh(keyGeo, mats.get('matteBlackPlastic'));
+        botKey.position.set(0, -4.2, -0.9);
+        iecGroup.add(botKey);
+
+        for (const px of [-4.3, 4.3]) {
+          const pinCollarGeo = new THREE.CylinderGeometry(2.1, 2.1, 1.4, 20);
+          pinCollarGeo.rotateX(Math.PI / 2);
+          const pinCollar = new THREE.Mesh(pinCollarGeo, mats.get('chrome'));
+          pinCollar.position.set(px, 0, -1.0);
+          iecGroup.add(pinCollar);
+
+          const pinTipGeo = new THREE.CylinderGeometry(1.1, 1.1, 1.6, 16);
+          pinTipGeo.rotateX(Math.PI / 2);
+          const pinTip = new THREE.Mesh(pinTipGeo, mats.get('deepRecessBlack'));
+          pinTip.position.set(px, 0, -1.05);
+          iecGroup.add(pinTip);
+        }
+
+        // --- 2. SNAP-IN POWER ROCKER SWITCH (`I / O` at World X = -19.5mm, Y = +6.0mm) ---
+        const switchGroup = new THREE.Group();
+        switchGroup.position.set(-19.5, 6.0, 0);
+        this.group.add(switchGroup);
+
+        const swFrameGeo = new RoundedBoxGeometry(16.2, 23.8, 2.4, 2, 0.45);
+        const swFrame = new THREE.Mesh(swFrameGeo, mats.get('matteBlackPlastic'));
+        swFrame.position.set(0, 0, -0.45);
+        switchGroup.add(swFrame);
+
+        const swRecessGeo = new THREE.BoxGeometry(12.2, 18.8, 2.5);
+        const swRecess = new THREE.Mesh(swRecessGeo, mats.get('deepRecessBlack'));
+        swRecess.position.set(0, 0, -0.5);
+        switchGroup.add(swRecess);
+
+        const rockerCanvas = document.createElement('canvas');
+        rockerCanvas.width = 256;
+        rockerCanvas.height = 512;
+        const rctx = rockerCanvas.getContext('2d');
+
+        const rGrad = rctx.createLinearGradient(0, 0, 0, 512);
+        rGrad.addColorStop(0.0, '#2c2e32');
+        rGrad.addColorStop(0.5, '#1d1e21');
+        rGrad.addColorStop(1.0, '#2e3034');
+        rctx.fillStyle = rGrad;
+        rctx.fillRect(0, 0, 256, 512);
+
+        rctx.strokeStyle = '#e8e8e8';
+        rctx.lineWidth = 14;
+        rctx.lineCap = 'round';
+        rctx.beginPath();
+        rctx.moveTo(128, 86);
+        rctx.lineTo(128, 164);
+        rctx.stroke();
+
+        rctx.beginPath();
+        rctx.arc(128, 360, 42, 0, Math.PI * 2);
+        rctx.stroke();
+
+        const rockerTex = new THREE.CanvasTexture(rockerCanvas);
+        rockerTex.colorSpace = THREE.SRGBColorSpace;
+        const rockerFaceMat = new THREE.MeshStandardMaterial({
+          map: rockerTex,
+          roughness: 0.42,
+          metalness: 0.06
+        });
+
+        const rockerGeo = new RoundedBoxGeometry(11.4, 17.6, 3.6, 3, 0.6);
+        this.rockerMesh = new THREE.Mesh(rockerGeo, [
+          mats.get('matteBlackPlastic'),
+          mats.get('matteBlackPlastic'),
+          mats.get('matteBlackPlastic'),
+          mats.get('matteBlackPlastic'),
+          mats.get('matteBlackPlastic'),
+          rockerFaceMat
+        ]);
+        this.rockerMesh.position.set(0, 0, -0.9);
+        this.rockerMesh.rotation.x = this.context.state.powerOn ? -0.18 : 0.18;
+        switchGroup.add(this.rockerMesh);
+
+        this.registerInteractable(this.rockerMesh, {
+          type: 'rocker',
+          action: 'togglePower'
+        });
+
+        // --- 3. STEREO RCA PHONO OUTPUT JACKS (L at X = +30.5mm, R at X = +50.5mm, Y = +10.2mm) ---
+        const createRcaJack = (x, y, insulatorMat) => {
+          const rcaGroup = new THREE.Group();
+          rcaGroup.position.set(x, y, 0);
+
+          const collarGeo = new THREE.CylinderGeometry(7.2, 7.2, 1.8, 32);
+          collarGeo.rotateX(Math.PI / 2);
+          const collar = new THREE.Mesh(collarGeo, mats.get('matteBlackPlastic'));
+          collar.position.set(0, 0, -0.4);
+          rcaGroup.add(collar);
+
+          const innerRingGeo = new THREE.CylinderGeometry(5.6, 5.6, 2.0, 32);
+          innerRingGeo.rotateX(Math.PI / 2);
+          const innerRing = new THREE.Mesh(innerRingGeo, mats.get('deepRecessBlack'));
+          innerRing.position.set(0, 0, -0.5);
+          rcaGroup.add(innerRing);
+
+          const barrelGeo = new THREE.CylinderGeometry(4.7, 4.7, 3.8, 32);
+          barrelGeo.rotateX(Math.PI / 2);
+          const barrel = new THREE.Mesh(barrelGeo, mats.get('chrome'));
+          barrel.position.set(0, 0, -1.1);
+          barrel.castShadow = true;
+          rcaGroup.add(barrel);
+
+          const insulGeo = new THREE.CylinderGeometry(3.6, 3.6, 4.0, 28);
+          insulGeo.rotateX(Math.PI / 2);
+          const insul = new THREE.Mesh(insulGeo, insulatorMat);
+          insul.position.set(0, 0, -1.15);
+          rcaGroup.add(insul);
+
+          const holeGeo = new THREE.CylinderGeometry(1.65, 1.65, 4.2, 24);
+          holeGeo.rotateX(Math.PI / 2);
+          const hole = new THREE.Mesh(holeGeo, mats.get('deepRecessBlack'));
+          hole.position.set(0, 0, -1.2);
+          rcaGroup.add(hole);
+
+          this.group.add(rcaGroup);
+        };
+
+        createRcaJack(30.5, 10.2, mats.get('rcaWhite'));
+        createRcaJack(50.5, 10.2, mats.get('rcaRed'));
+      }
+
+      update(delta) {
+        const targetRotX = this.context.state.powerOn ? -0.18 : 0.18;
+        this.rockerMesh.rotation.x += (targetRotX - this.rockerMesh.rotation.x) * Math.min(1.0, delta * 14.0);
+      }
+    }
+
+    /**
+     * ============================================================================
+     * 6. INTERACTION CONTROLLER (Raycasting for Buttons, Rocker Switch & Pitch Fader)
+     * ============================================================================
+     */
+    export class InteractionController {
+      constructor(context) {
+        this.context = context;
+        this.raycaster = new THREE.Raycaster();
+        this.pointer = new THREE.Vector2();
+        this.dragPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -AppConfig.dimensions.chassisHeight / 2 - 6.0);
+        this.intersectPoint = new THREE.Vector3();
+
+        this.activeFader = null;
+        this.activeButton = null;
+
+        this.bindEvents();
+      }
+
+      bindEvents() {
+        const dom = this.context.renderer.domElement;
+        dom.addEventListener('pointerdown', (e) => this.onPointerDown(e));
+        window.addEventListener('pointermove', (e) => this.onPointerMove(e));
+        window.addEventListener('pointerup', (e) => this.onPointerUp(e));
+      }
+
+      updatePointer(event) {
+        const rect = this.context.renderer.domElement.getBoundingClientRect();
+        this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        this.pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+      }
+
+      onPointerDown(event) {
+        this.updatePointer(event);
+        this.raycaster.setFromCamera(this.pointer, this.context.camera);
+        const hits = this.raycaster.intersectObjects(this.context.rootComponent.interactables, true);
+
+        if (hits.length > 0) {
+          let obj = hits[0].object;
+          while (obj && !obj.userData.interactable) {
+            obj = obj.parent;
+          }
+          if (!obj) return;
+
+          const handler = obj.userData.handler;
+          if (handler.type === 'fader') {
+            this.activeFader = handler;
+            this.context.controls.enabled = false;
+            this.context.renderer.domElement.style.cursor = 'ns-resize';
+          } else if (handler.type === 'button') {
+            this.activeButton = { mesh: obj, handler };
+            obj.position[handler.pressAxis] = handler.pressDepth;
+            this.triggerAction(handler.action);
+          } else if (handler.type === 'rocker') {
+            this.triggerAction(handler.action);
+          }
+        }
+      }
+
+      onPointerMove(event) {
+        this.updatePointer(event);
+        this.raycaster.setFromCamera(this.pointer, this.context.camera);
+
+        if (this.activeFader) {
+          if (this.raycaster.ray.intersectPlane(this.dragPlane, this.intersectPoint)) {
+            const localPoint = this.context.rootComponent.group.worldToLocal(this.intersectPoint.clone());
+            const clampedZ = Math.max(this.activeFader.minZ, Math.min(this.activeFader.maxZ, localPoint.z));
+            this.activeFader.faderGroup.position.z = clampedZ;
+            this.context.state.pitchNormalized = (clampedZ - this.activeFader.centerZ) / this.activeFader.halfTravel;
+          }
+          return;
+        }
+
+        const hits = this.raycaster.intersectObjects(this.context.rootComponent.interactables, true);
+        this.context.renderer.domElement.style.cursor = hits.length > 0 ? 'pointer' : '';
+      }
+
+      onPointerUp() {
+        if (this.activeFader) {
+          this.activeFader = null;
+          this.context.controls.enabled = true;
+          this.context.renderer.domElement.style.cursor = '';
+        }
+        if (this.activeButton) {
+          const { mesh, handler } = this.activeButton;
+          mesh.position[handler.pressAxis] = handler.basePos;
+          this.activeButton = null;
+        }
+      }
+
+      triggerAction(action) {
+        const state = this.context.state;
+        switch (action) {
+          case 'togglePower':
+            state.powerOn = !state.powerOn;
+            if (!state.powerOn) state.trayOpen = false;
+            break;
+          case 'toggleTray':
+            if (state.powerOn) {
+              state.trayOpen = !state.trayOpen;
+            }
+            break;
+          case 'playPause':
+            if (state.powerOn && !state.trayOpen) {
+              state.isPlaying = !state.isPlaying;
+            }
+            break;
+          case 'prevTrack':
+            if (state.powerOn && !state.trayOpen) {
+              state.track = state.track > 1 ? state.track - 1 : 12;
+              state.elapsedSeconds = 0.0;
+            }
+            break;
+          case 'nextTrack':
+            if (state.powerOn && !state.trayOpen) {
+              state.track = state.track < 12 ? state.track + 1 : 1;
+              state.elapsedSeconds = 0.0;
+            }
+            break;
+          case 'rewind':
+            if (state.powerOn && !state.trayOpen) {
+              state.elapsedSeconds = Math.max(0.0, state.elapsedSeconds - 5.0);
+            }
+            break;
+          case 'fastForward':
+            if (state.powerOn && !state.trayOpen) {
+              state.elapsedSeconds += 5.0;
+            }
+            break;
+        }
+      }
+    }
+
+    /**
+     * ============================================================================
+     * 7. DEVICE ASSEMBLER & SCENE MANAGER (WebGPU Renderer + HDRI Lighting)
+     * ============================================================================
+     */
+    export class DeviceAssembler extends Component3D {
+      init() {
+        this.addSubComponent(new ChassisComponent('chassis', this.context));
+        this.addSubComponent(new WoodCheeksComponent('woodCheeks', this.context));
+        this.addSubComponent(new DvdDriveComponent('dvdDrive', this.context));
+        this.addSubComponent(new LcdDisplayComponent('lcdDisplay', this.context));
+        this.addSubComponent(new TopPanelControlsComponent('topControls', this.context));
+        this.addSubComponent(new RearPanelComponent('rearPanel', this.context));
+      }
+    }
+
+    export class DeviceApp {
+      constructor(container) {
+        this.container = container;
+        this.state = { ...AppConfig.initialState };
+        this.clock = new THREE.Clock();
+        this.customModules = new Map();
+      }
+
+      async init() {
+        // Verify WebGPU device availability upfront so restricted iframes fall back cleanly
+        let forceWebGL = false;
+        if (navigator.gpu) {
+          try {
+            const adapter = await navigator.gpu.requestAdapter();
+            if (!adapter) {
+              forceWebGL = true;
+            } else {
+              const testDevice = await adapter.requestDevice();
+              testDevice.destroy();
+            }
+          } catch (e) {
+            forceWebGL = true;
+          }
+        } else {
+          forceWebGL = true;
+        }
+
+        this.renderer = new THREE.WebGPURenderer({
+          antialias: true,
+          alpha: false,
+          forceWebGL,
+          powerPreference: 'high-performance'
+        });
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+        this.renderer.toneMappingExposure = 1.08;
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+        await this.renderer.init();
+        this.container.appendChild(this.renderer.domElement);
+
+        // Scene with Photographic Studio Background & High-Contrast Studio HDRI
+        this.scene = new THREE.Scene();
+        this.scene.background = new THREE.Color(AppConfig.colors.studioBg);
+
+        // 1. Apply high-contrast 32-bit Radiance (.hdr RGBE) Studio HDRI immediately
+        const studioHdri = ProceduralTextures.createStudioRadianceHDRI(1024, 512);
+        this.scene.environment = studioHdri;
+        this.scene.environmentIntensity = 1.15;
+
+        // 2. Load real photographic studio HDRI with high contrast & natural depth
+        this.loadExternalHDRI('https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/studio_small_09_1k.hdr');
+
+        // Perspective Camera
+        this.camera = new THREE.PerspectiveCamera(34, window.innerWidth / window.innerHeight, 5.0, 2500.0);
+        this.camera.position.set(175, 165, 290);
+
+        // OrbitControls
+        this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+        this.controls.enableDamping = true;
+        this.controls.dampingFactor = 0.055;
+        this.controls.target.set(0, -2, 0);
+        this.controls.minDistance = 120;
+        this.controls.maxDistance = 750;
+        this.controls.maxPolarAngle = Math.PI * 0.56;
+        this.controls.update();
+
+        // Setup High-Contrast Studio Softbox & Contact Shadow Rig
+        this.setupHdriStudioRig();
+
+        // Initialize Material Library & Root Device Assembly
+        this.materials = new MaterialLibrary();
+        this.rootComponent = new DeviceAssembler('djCdDevice', this);
+        this.rootComponent.init();
+        this.scene.add(this.rootComponent.group);
+
+        // Initialize Interactive Raycaster Controller
+        this.interaction = new InteractionController(this);
+
+        // Responsive Viewport Resize Handler
+        window.addEventListener('resize', () => this.onResize());
+
+        // Start Render Loop
+        this.renderer.setAnimationLoop(() => this.render());
+      }
+
+      /**
+       * Loads a real photographic studio .hdr file via RGBELoader and PMREMGenerator
+       * (with automatic fallback to EquirectangularReflectionMapping)
+       */
+      loadExternalHDRI(url) {
+        const loader = new RGBELoader();
+        loader.load(
+          url,
+          (hdrTexture) => {
+            hdrTexture.mapping = THREE.EquirectangularReflectionMapping;
+            hdrTexture.minFilter = THREE.LinearFilter;
+            hdrTexture.magFilter = THREE.LinearFilter;
+            hdrTexture.needsUpdate = true;
+
+            try {
+              if (THREE.PMREMGenerator) {
+                const pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+                pmremGenerator.compileEquirectangularShader();
+                const envMap = pmremGenerator.fromEquirectangular(hdrTexture).texture;
+                this.scene.environment = envMap;
+                hdrTexture.dispose();
+                pmremGenerator.dispose();
+                return;
+              }
+            } catch (e) {
+              // Fallback to direct equirectangular HDR texture on WebGPU backend
+            }
+            this.scene.environment = hdrTexture;
+          },
+          undefined,
+          () => {}
+        );
+      }
+
+      setupHdriStudioRig() {
+        // 1. Primary Key Softbox Light (Front-Right Overhead) for strong 3D form, deep shadows & crisp orange-peel highlights
+        const keyLight = new THREE.DirectionalLight(0xfffaf2, 2.85);
+        keyLight.position.set(115, 225, 195);
+        keyLight.castShadow = true;
+        keyLight.shadow.mapSize.width = 2048;
+        keyLight.shadow.mapSize.height = 2048;
+        keyLight.shadow.camera.near = 50;
+        keyLight.shadow.camera.far = 650;
+        const d = 135;
+        keyLight.shadow.camera.left = -d;
+        keyLight.shadow.camera.right = d;
+        keyLight.shadow.camera.top = d;
+        keyLight.shadow.camera.bottom = -d;
+        keyLight.shadow.bias = -0.0004;
+        this.scene.add(keyLight);
+
+        // 2. Dramatic Rear-Left Rim / Backlight to carve out top controls, fader knob & chassis edges
+        const rimLight = new THREE.DirectionalLight(0xfff5e8, 2.15);
+        rimLight.position.set(-140, 145, -195);
+        this.scene.add(rimLight);
+
+        // 3. Rear-Right Low Specular Softbox (reproduces the lower-right orange-peel reflection in the Rear View photo)
+        const rearSoftbox = new THREE.DirectionalLight(0xfffcf8, 1.65);
+        rearSoftbox.position.set(-85, -35, -220);
+        this.scene.add(rearSoftbox);
+
+        // 4. Subtle Lateral Grazing Kicker for the oak wood pore relief and DVD bezel depth
+        const sideKicker = new THREE.DirectionalLight(0xffeedd, 0.95);
+        sideKicker.position.set(240, 55, 65);
+        this.scene.add(sideKicker);
+
+        // Soft studio floor contact shadow plane directly beneath the 4 rubber feet
+        const floorY = -AppConfig.dimensions.chassisHeight / 2 - AppConfig.dimensions.footHeight + 0.3;
+
+        const aoCanvas = document.createElement('canvas');
+        aoCanvas.width = 1024;
+        aoCanvas.height = 1024;
+        const actx = aoCanvas.getContext('2d');
+        actx.clearRect(0, 0, 1024, 1024);
+
+        actx.save();
+        actx.translate(512, 518);
+        actx.scale(1.0, 1.06);
+        const bodyGrad = actx.createRadialGradient(0, 0, 65, 0, 0, 395);
+        bodyGrad.addColorStop(0.0, 'rgba(0, 0, 0, 0.52)');
+        bodyGrad.addColorStop(0.48, 'rgba(0, 0, 0, 0.34)');
+        bodyGrad.addColorStop(0.76, 'rgba(0, 0, 0, 0.11)');
+        bodyGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
+        actx.fillStyle = bodyGrad;
+        actx.fillRect(-512, -512, 1024, 1024);
+        actx.restore();
+
+        const planeW = 280;
+        const planeD = 300;
+        const { footInsetX, footInsetZ } = AppConfig.dimensions;
+        const feetCoords = [
+          [-footInsetX, -footInsetZ],
+          [footInsetX, -footInsetZ],
+          [-footInsetX, footInsetZ],
+          [footInsetX, footInsetZ]
+        ];
+        for (const [fx, fz] of feetCoords) {
+          const cx = 512 + (fx / planeW) * 1024;
+          const cy = 512 + (fz / planeD) * 1024;
+          const footGrad = actx.createRadialGradient(cx, cy, 6, cx, cy, 58);
+          footGrad.addColorStop(0.0, 'rgba(0, 0, 0, 0.64)');
+          footGrad.addColorStop(0.50, 'rgba(0, 0, 0, 0.24)');
+          footGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0.0)');
+          actx.fillStyle = footGrad;
+          actx.beginPath();
+          actx.arc(cx, cy, 58, 0, Math.PI * 2);
+          actx.fill();
+        }
+
+        const aoTex = new THREE.CanvasTexture(aoCanvas);
+        const aoGeo = new THREE.PlaneGeometry(planeW, planeD);
+        aoGeo.rotateX(-Math.PI / 2);
+        const aoMat = new THREE.MeshBasicMaterial({
+          map: aoTex,
+          transparent: true,
+          depthWrite: false
+        });
+        const aoMesh = new THREE.Mesh(aoGeo, aoMat);
+        aoMesh.position.y = floorY + 0.05;
+        this.scene.add(aoMesh);
+      }
+
+      registerComponent(componentInstance) {
+        this.rootComponent.addSubComponent(componentInstance);
+        return componentInstance;
+      }
+
+      registerWebModule(name, moduleInstance) {
+        this.customModules.set(name, moduleInstance);
+        if (typeof moduleInstance.init === 'function') {
+          moduleInstance.init(this);
+        }
+        return moduleInstance;
+      }
+
+      onResize() {
+        this.camera.aspect = window.innerWidth / window.innerHeight;
+        this.camera.updateProjectionMatrix();
+        this.renderer.setSize(window.innerWidth, window.innerHeight);
+      }
+
+      render() {
+        const delta = Math.min(this.clock.getDelta(), 0.1);
+        const elapsed = this.clock.getElapsedTime();
+
+        this.controls.update();
+        this.rootComponent.update(delta, elapsed);
+
+        for (const mod of this.customModules.values()) {
+          if (typeof mod.update === 'function') {
+            mod.update(delta, elapsed);
+          }
+        }
+
+        this.renderer.render(this.scene, this.camera);
+      }
+    }
+
+    window.addEventListener('DOMContentLoaded', async () => {
+      const container = document.getElementById('viewport');
+      const app = new DeviceApp(container);
+      window.DeviceApp = app;
+      await app.init();
+    });
+  </script>
+</body>
+</html>
